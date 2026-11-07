@@ -2,7 +2,10 @@ package com.abplayer.app
 
 import android.Manifest
 import android.app.AlertDialog
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -11,14 +14,14 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.media.MediaMetadataRetriever
-import android.media.MediaPlayer
 import android.media.audiofx.Equalizer
 import android.media.audiofx.LoudnessEnhancer
-import android.os.Build
+import android.net.Uri
 import android.os.Bundle
 import android.os.CountDownTimer
 import android.os.Environment
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
 import android.text.InputType
 import android.view.View
@@ -27,20 +30,21 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.abplayer.app.databinding.ActivityMainBinding
+import com.google.android.exoplayer2.C
+import com.google.android.exoplayer2.ExoPlayer
+import com.google.android.exoplayer2.MediaItem
+import com.google.android.exoplayer2.PlaybackException
+import com.google.android.exoplayer2.PlaybackParameters
+import com.google.android.exoplayer2.Player
+import com.google.android.exoplayer2.audio.AudioAttributes
 import java.io.File
 import java.util.Locale
 import kotlin.math.sqrt
-import android.content.ComponentName
-import android.content.Intent
-import android.content.ServiceConnection
-import android.os.IBinder
-import android.os.PowerManager
-import java.io.FileInputStream
 
 class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private lateinit var binding: ActivityMainBinding
-    private var mediaPlayer: MediaPlayer? = null
+    private var exoPlayer: ExoPlayer? = null
     private var equalizer: Equalizer? = null
     private var loudnessEnhancer: LoudnessEnhancer? = null
 
@@ -61,6 +65,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private var lastSleepDurationMs = 0L
     private lateinit var sensorManager: SensorManager
     private var lastShakeTime = 0L
+
     private var playerService: PlayerService? = null
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -71,6 +76,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             playerService = null
         }
     }
+
     private val audioExtensions = setOf("mp3", "m4b", "m4a", "ogg", "flac", "wav", "aac", "opus")
     private val buttonKeys = arrayOf("show_sleep", "show_audio", "show_chapters", "show_speed", "show_characters", "show_history", "show_lock")
     private val buttonNames = arrayOf("Таймер сна", "Звук и эквалайзер", "Главы и закладки", "Скорость (1.0x)", "Персонажи", "История позиций", "Замок блокировки")
@@ -82,18 +88,58 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
         val serviceIntent = Intent(this, PlayerService::class.java)
         startService(serviceIntent)
         bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
+
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
         autoRewindSec = prefs.getInt("auto_rewind", 10)
         playbackSpeed = prefs.getFloat("playback_speed", 1.0f)
         binding.btnSpeed.text = String.format(Locale.US, "%.1fx", playbackSpeed)
 
+        initExoPlayer()
         applyToolbarVisibility()
         setupListeners()
         checkStoragePermissionAndLoad()
+    }
+
+    private fun initExoPlayer() {
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
+            .build()
+
+        exoPlayer = ExoPlayer.Builder(this)
+            .setAudioAttributes(audioAttributes, true)
+            .setHandleAudioBecomingNoisy(true)
+            .build().apply {
+                setWakeMode(C.WAKE_MODE_LOCAL)
+                addListener(object : Player.Listener {
+                    override fun onPlaybackStateChanged(state: Int) {
+                        if (state == Player.STATE_READY) {
+                            binding.seekBar.max = duration.toInt().coerceAtLeast(100)
+                            applyAudioEffects()
+                            updateProgressUI()
+                        } else if (state == Player.STATE_ENDED) {
+                            val book = currentBook ?: return
+                            if (currentChapterIndex + 1 < book.chapters.size) {
+                                playChapter(currentChapterIndex + 1, 0L, true)
+                            } else {
+                                getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
+                                    .edit().putString("status_${book.folder.absolutePath}", "finished").apply()
+                                binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
+                                playerService?.stopForegroundPlayer()
+                            }
+                        }
+                    }
+
+                    override fun onPlayerError(error: PlaybackException) {
+                        Toast.makeText(this@MainActivity, "Ошибка воспроизведения: ${error.message}", Toast.LENGTH_LONG).show()
+                    }
+                })
+            }
     }
 
     private fun checkStoragePermissionAndLoad() {
@@ -106,7 +152,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 101 && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+        if (requestCode == 101 && grantResults.isNotEmpty() && grantResults.get(0) == PackageManager.PERMISSION_GRANTED) {
             loadLibraryFromSavedRoot()
         } else {
             Toast.makeText(this, "Нужно разрешение на чтение памяти для поиска книг", Toast.LENGTH_LONG).show()
@@ -118,10 +164,10 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         binding.btnLibrary.setOnClickListener { showLibraryDialog() }
         binding.btnPlayPause.setOnClickListener { togglePlayPause() }
 
-        binding.btnRew1m.setOnClickListener { seekRelative(-60000) }
-        binding.btnRew10s.setOnClickListener { seekRelative(-10000) }
-        binding.btnFwd10s.setOnClickListener { seekRelative(10000) }
-        binding.btnFwd1m.setOnClickListener { seekRelative(60000) }
+        binding.btnRew1m.setOnClickListener { seekRelative(-60000L) }
+        binding.btnRew10s.setOnClickListener { seekRelative(-10000L) }
+        binding.btnFwd10s.setOnClickListener { seekRelative(10000L) }
+        binding.btnFwd1m.setOnClickListener { seekRelative(60000L) }
 
         binding.btnLock.setOnClickListener {
             isLocked = !isLocked
@@ -134,7 +180,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 if (fromUser && !isLocked) {
                     recordHistory("Перемотка")
-                    mediaPlayer?.seekTo(progress)
+                    exoPlayer?.seekTo(progress.toLong())
                     saveBookState()
                     updateProgressUI()
                 }
@@ -150,8 +196,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         binding.btnCharacters.setOnClickListener { showCharactersDialog() }
         binding.btnHistory.setOnClickListener { showHistoryDialog() }
     }
-
-    // --- ГЛАВНОЕ МЕНЮ НАСТРОЕК ---
     private fun showMainSettingsMenu() {
         val options = arrayOf(
             "📁 Выбрать корневую папку с книгами",
@@ -176,7 +220,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         AlertDialog.Builder(this)
             .setTitle("Автоперемотка после паузы")
             .setItems(values) { _, which ->
-                autoRewindSec = secs[which]
+                autoRewindSec = secs.get(which)
                 getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE).edit().putInt("auto_rewind", autoRewindSec).apply()
             }
             .show()
@@ -196,17 +240,16 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 if (which == 0) {
                     getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE).edit().putString("root_folder", currentDir.absolutePath).apply()
                     loadLibraryFromSavedRoot()
-                } else if (items[which].startsWith("⬆")) {
+                } else if (items.get(which).startsWith("⬆")) {
                     currentDir.parentFile?.let { showFolderPickerDialog(it) }
                 } else {
-                    val dirName = items[which].removePrefix("📁 ")
+                    val dirName = items.get(which).removePrefix("📁 ")
                     showFolderPickerDialog(File(currentDir, dirName))
                 }
             }
             .show()
     }
 
-    // --- СКАНЕР ПАПОК И БИБЛИОТЕКА ---
     private fun loadLibraryFromSavedRoot() {
         val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
         val rootPath = prefs.getString("root_folder", null) ?: return
@@ -282,7 +325,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             }
             .show()
     }
-
     private fun openBook(book: BookItem, autoPlay: Boolean) {
         currentBook = book
         val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
@@ -296,77 +338,49 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         }
 
         val savedChapter = prefs.getInt("chap_${book.folder.absolutePath}", 0).coerceIn(0, book.chapters.size - 1)
-        val savedPos = prefs.getInt("pos_${book.folder.absolutePath}", 0)
+        val savedPos = prefs.getLong("pos_ms_${book.folder.absolutePath}", 0L)
         playChapter(savedChapter, savedPos, autoPlay)
     }
 
-    private fun playChapter(index: Int, startPosMs: Int, autoPlay: Boolean) {
+    private fun playChapter(index: Int, startPosMs: Long, autoPlay: Boolean) {
         val book = currentBook ?: return
         if (index !in book.chapters.indices) return
         currentChapterIndex = index
         val chapter = book.chapters.get(index)
 
-        mediaPlayer?.release()
-        equalizer?.release()
-        loudnessEnhancer?.release()
-
-        try {
-            val fis = FileInputStream(chapter.file)
-            mediaPlayer = MediaPlayer().apply {
-                setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
-                setDataSource(fis.fd)
-                fis.close()
-                prepare()
-                if (startPosMs > 0 && startPosMs < duration) {
-                    seekTo(startPosMs)
-                }
-                setOnErrorListener { _, what, extra ->
-                    Toast.makeText(this@MainActivity, "Ошибка файла (${chapter.file.name}): $what/$extra", Toast.LENGTH_LONG).show()
-                    true
-                }
-                setOnCompletionListener {
-                    if (currentChapterIndex + 1 < book.chapters.size) {
-                        playChapter(currentChapterIndex + 1, 0, true)
-                    } else {
-                        getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-                            .edit().putString("status_${book.folder.absolutePath}", "finished").apply()
-                        binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
-                        playerService?.stopForegroundPlayer()
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Toast.makeText(this, "Не удалось открыть: ${chapter.file.name} (${e.message})", Toast.LENGTH_LONG).show()
-            return
+        val player = exoPlayer ?: return
+        val mediaItem = MediaItem.fromUri(Uri.fromFile(chapter.file))
+        player.setMediaItem(mediaItem)
+        player.prepare()
+        if (startPosMs > 0L) {
+            player.seekTo(startPosMs)
         }
-
-        applyAudioEffects()
-        applyPlaybackSpeed()
+        player.playbackParameters = PlaybackParameters(playbackSpeed)
 
         val chapText = "${index + 1}/${book.chapters.size}: ${chapter.file.nameWithoutExtension}"
         binding.tvChapterTitle.text = chapText
-        binding.seekBar.max = mediaPlayer?.duration ?: 100
-        binding.seekBar.progress = startPosMs
+        binding.seekBar.progress = startPosMs.toInt()
 
         if (autoPlay) {
             startPlayback()
         } else {
+            player.pause()
             binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
         }
         updateProgressUI()
     }
 
     private fun togglePlayPause() {
-        val mp = mediaPlayer ?: return
-        if (mp.isPlaying) {
-            mp.pause()
+        val player = exoPlayer ?: return
+        if (player.isPlaying) {
+            player.pause()
             saveBookState()
             binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
             handler.removeCallbacks(updateRunnable)
             playerService?.stopForegroundPlayer()
         } else {
-            if (autoRewindSec > 0 && mp.currentPosition > autoRewindSec * 1000) {
-                mp.seekTo(mp.currentPosition - autoRewindSec * 1000)
+            if (autoRewindSec > 0 && player.currentPosition > autoRewindSec * 1000L) {
+                player.seekTo(player.currentPosition - autoRewindSec * 1000L)
             }
             startPlayback()
         }
@@ -376,31 +390,31 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         val book = currentBook ?: return
         getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
             .edit().putString("status_${book.folder.absolutePath}", "started").apply()
-        mediaPlayer?.start()
+        exoPlayer?.play()
         binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
         playerService?.startForegroundPlayer(book.title, binding.tvChapterTitle.text.toString())
         handler.post(updateRunnable)
     }
 
-    private fun seekRelative(deltaMs: Int) {
+    private fun seekRelative(deltaMs: Long) {
         if (isLocked) {
             Toast.makeText(this, "Сначала разблокируйте замок сверху", Toast.LENGTH_SHORT).show()
             return
         }
-        val mp = mediaPlayer ?: return
-        val dur = mp.duration
-        if (dur <= 0) return
+        val player = exoPlayer ?: return
+        val dur = player.duration
+        if (dur <= 0L) return
         recordHistory(if (deltaMs < 0) "Назад" else "Вперед")
-        val target = (mp.currentPosition + deltaMs).coerceIn(0, dur - 500)
-        mp.seekTo(target)
-        binding.seekBar.progress = target
+        val target = (player.currentPosition + deltaMs).coerceIn(0L, dur - 200L)
+        player.seekTo(target)
+        binding.seekBar.progress = target.toInt()
         saveBookState()
         updateProgressUI()
     }
 
     private val updateRunnable = object : Runnable {
         override fun run() {
-            if (mediaPlayer?.isPlaying == true) {
+            if (exoPlayer?.isPlaying == true) {
                 updateProgressUI()
                 saveBookState()
                 handler.postDelayed(this, 1000)
@@ -410,9 +424,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private fun updateProgressUI() {
         val book = currentBook ?: return
-        val mp = mediaPlayer ?: return
-        val curPos = mp.currentPosition
-        binding.seekBar.progress = curPos
+        val player = exoPlayer ?: return
+        val curPos = player.currentPosition.coerceAtLeast(0L)
+        binding.seekBar.progress = curPos.toInt()
 
         var readMs = 0L
         for (i in 0 until currentChapterIndex) {
@@ -421,23 +435,24 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         readMs += curPos
         val totalMs = book.totalDurationMs.coerceAtLeast(1L)
         val leftMs = (totalMs - readMs).coerceAtLeast(0L)
-        val percent = ((readMs * 100) / totalMs).toInt()
+        val percent = ((readMs * 100) / totalMs).toInt().coerceIn(0, 100)
 
         binding.tvTotalProgress.text = "Read ${formatTime(readMs)} of ${formatTime(totalMs)}   $percent%   Left ${formatTime(leftMs)}"
     }
 
     private fun saveBookState() {
         val book = currentBook ?: return
-        val pos = mediaPlayer?.currentPosition ?: return
+        val pos = exoPlayer?.currentPosition ?: return
         getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE).edit()
             .putInt("chap_${book.folder.absolutePath}", currentChapterIndex)
-            .putInt("pos_${book.folder.absolutePath}", pos)
+            .putLong("pos_ms_${book.folder.absolutePath}", pos)
             .apply()
     }
-
     private fun applyAudioEffects() {
-        val sessionId = mediaPlayer?.audioSessionId ?: return
+        val sessionId = exoPlayer?.audioSessionId ?: return
+        if (sessionId == C.AUDIO_SESSION_ID_UNSET) return
         try {
+            loudnessEnhancer?.release()
             loudnessEnhancer = LoudnessEnhancer(sessionId).apply {
                 setTargetGain(boostGainMb)
                 enabled = boostGainMb > 0
@@ -445,6 +460,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         } catch (_: Exception) {}
 
         try {
+            equalizer?.release()
             equalizer = Equalizer(0, sessionId).apply {
                 enabled = true
                 val bands = numberOfBands.toInt()
@@ -521,21 +537,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 playbackSpeed = vals.get(which)
                 binding.btnSpeed.text = speeds.get(which)
                 getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE).edit().putFloat("playback_speed", playbackSpeed).apply()
-                applyPlaybackSpeed()
+                exoPlayer?.playbackParameters = PlaybackParameters(playbackSpeed)
             }
             .show()
-    }
-
-    private fun applyPlaybackSpeed() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            try {
-                mediaPlayer?.let {
-                    val wasPlaying = it.isPlaying
-                    it.playbackParams = it.playbackParams.setSpeed(playbackSpeed)
-                    if (!wasPlaying) it.pause()
-                }
-            } catch (_: Exception) {}
-        }
     }
 
     private fun showSleepTimerDialog() {
@@ -566,7 +570,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         sleepTimer = object : CountDownTimer(durationMs, 1000) {
             override fun onTick(millisUntilFinished: Long) { sleepRemainingMs = millisUntilFinished }
             override fun onFinish() {
-                if (mediaPlayer?.isPlaying == true) togglePlayPause()
+                if (exoPlayer?.isPlaying == true) togglePlayPause()
                 binding.btnSleep.setColorFilter(Color.parseColor("#CCCCCC"))
                 sensorManager.unregisterListener(this@MainActivity)
             }
@@ -597,7 +601,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
         AlertDialog.Builder(this)
             .setTitle("Главы книги (${book.chapters.size})")
-            .setItems(items) { _, which -> playChapter(which, 0, true) }
+            .setItems(items) { _, which -> playChapter(which, 0L, true) }
             .setNeutralButton("🔖 Закладки") { _, _ -> showBookmarksDialog() }
             .show()
     }
@@ -618,7 +622,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             .setTitle("Закладки")
             .setItems(display) { _, which ->
                 val parts = list.get(which).split("|")
-                playChapter(parts.get(0).toInt(), parts.get(1).toInt(), true)
+                playChapter(parts.get(0).toInt(), parts.get(1).toLong(), true)
             }
             .setPositiveButton("+ Добавить закладку") { _, _ ->
                 val input = EditText(this).apply { hint = "Заметка (необязательно)" }
@@ -626,7 +630,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     .setTitle("Новая закладка")
                     .setView(input)
                     .setPositiveButton("Сохранить") { _, _ ->
-                        val pos = mediaPlayer?.currentPosition ?: 0
+                        val pos = exoPlayer?.currentPosition ?: 0L
                         list.add("$currentChapterIndex|$pos|${input.text}")
                         prefs.edit().putString(key, list.joinToString(";;")).apply()
                         Toast.makeText(this, "Закладка сохранена", Toast.LENGTH_SHORT).show()
@@ -656,8 +660,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun recordHistory(action: String) {
-        val pos = mediaPlayer?.currentPosition ?: return
-        positionHistory.add(0, "$action: Глава ${currentChapterIndex + 1} — ${formatTime(pos.toLong())}")
+        val pos = exoPlayer?.currentPosition ?: return
+        positionHistory.add(0, "$action: Глава ${currentChapterIndex + 1} — ${formatTime(pos)}")
         if (positionHistory.size > 20) positionHistory.removeLast()
     }
 
@@ -707,8 +711,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         saveBookState()
         handler.removeCallbacks(updateRunnable)
         sensorManager.unregisterListener(this)
-        mediaPlayer?.release()
+        exoPlayer?.release()
         equalizer?.release()
         loudnessEnhancer?.release()
+        try { unbindService(serviceConnection) } catch (_: Exception) {}
     }
-}
+}            
