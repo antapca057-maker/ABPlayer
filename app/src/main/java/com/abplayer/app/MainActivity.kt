@@ -2,6 +2,8 @@ package com.abplayer.app
 
 import android.Manifest
 import android.app.AlertDialog
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -16,45 +18,39 @@ import android.hardware.SensorManager
 import android.media.MediaMetadataRetriever
 import android.media.audiofx.Equalizer
 import android.media.audiofx.LoudnessEnhancer
-import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.CountDownTimer
-import android.os.Environment
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.text.InputType
 import android.view.View
 import android.widget.*
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.abplayer.app.databinding.ActivityMainBinding
 import com.google.android.exoplayer2.C
-import com.google.android.exoplayer2.ExoPlayer
-import com.google.android.exoplayer2.MediaItem
-import com.google.android.exoplayer2.PlaybackException
 import com.google.android.exoplayer2.PlaybackParameters
-import com.google.android.exoplayer2.Player
-import com.google.android.exoplayer2.audio.AudioAttributes
 import java.io.File
+import java.nio.charset.Charset
 import java.util.Locale
 import kotlin.math.sqrt
 
 class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private lateinit var binding: ActivityMainBinding
-    private var exoPlayer: ExoPlayer? = null
-    private var equalizer: Equalizer? = null
-    private var loudnessEnhancer: LoudnessEnhancer? = null
+    private var playerService: PlayerService? = null
+    private var isBound = false
 
     private var isLocked = false
     private var playbackSpeed = 1.0f
     private var boostGainMb = 0
     private var eqPresetIndex = 0
-    private var autoRewindSec = 10
+    private var id3Mode = 0 // 0 = Имя файла, 1 = ID3 UTF-8, 2 = ID3 Windows-1251
 
-    private var booksList = mutableListOf<BookItem>()
     private var currentBook: BookItem? = null
     private var currentChapterIndex = 0
     private var positionHistory = mutableListOf<String>()
@@ -66,104 +62,127 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
     private var lastShakeTime = 0L
 
-    private var playerService: PlayerService? = null
+    private val audioExtensions = setOf("mp3", "m4b", "m4a", "ogg", "flac", "wav", "aac", "opus")
+    private val buttonKeys = arrayOf("show_sleep", "show_audio", "show_chapters", "show_speed", "show_characters", "show_history", "show_lock")
+    private val id3Labels = arrayOf("ID3: Файл", "ID3: UTF-8", "ID3: Win-1251")
+
+    data class ChapterItem(val file: File, val durationMs: Long, val rawTitle: String?)
+    data class BookItem(val folder: File, val title: String, val chapters: List<ChapterItem>, val totalDurationMs: Long, val coverFile: File?)
+
+    private val libraryLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == RESULT_OK) {
+            val path = result.data?.getStringExtra("selected_book_path")
+            if (path != null) {
+                loadSingleBook(File(path), autoPlay = true)
+            }
+        }
+    }
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val binder = service as PlayerService.LocalBinder
             playerService = binder.getService()
+            isBound = true
+
+            playerService?.onChapterEndedCallback = {
+                val book = currentBook
+                if (book != null && currentChapterIndex + 1 < book.chapters.size) {
+                    playChapter(currentChapterIndex + 1, 0L, true)
+                } else if (book != null) {
+                    getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
+                        .edit().putString("status_${book.folder.absolutePath}", "finished").apply()
+                    binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
+                }
+            }
+            playerService?.onStateChangedCallback = {
+                runOnUiThread {
+                    val isPlaying = playerService?.exoPlayer?.isPlaying == true
+                    binding.btnPlayPause.setImageResource(
+                        if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+                    )
+                    applyAudioEffects()
+                    updateProgressUI()
+                }
+            }
+            syncWithRunningServiceOrLoadSaved()
         }
+
         override fun onServiceDisconnected(name: ComponentName?) {
             playerService = null
+            isBound = false
         }
     }
-
-    private val audioExtensions = setOf("mp3", "m4b", "m4a", "ogg", "flac", "wav", "aac", "opus")
-    private val buttonKeys = arrayOf("show_sleep", "show_audio", "show_chapters", "show_speed", "show_characters", "show_history", "show_lock")
-    private val buttonNames = arrayOf("Таймер сна", "Звук и эквалайзер", "Главы и закладки", "Скорость (1.0x)", "Персонажи", "История позиций", "Замок блокировки")
-
-    data class ChapterItem(val file: File, val durationMs: Long)
-    data class BookItem(val folder: File, val title: String, val chapters: List<ChapterItem>, val totalDurationMs: Long, val coverFile: File?)
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        createNotificationChannel()
         val serviceIntent = Intent(this, PlayerService::class.java)
         startService(serviceIntent)
         bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
 
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-        autoRewindSec = prefs.getInt("auto_rewind", 10)
-        playbackSpeed = prefs.getFloat("playback_speed", 1.0f)
-        binding.btnSpeed.text = String.format(Locale.US, "%.1fx", playbackSpeed)
-
-        initExoPlayer()
-        applyToolbarVisibility()
         setupListeners()
-        checkStoragePermissionAndLoad()
+        checkStoragePermission()
     }
 
-    private fun initExoPlayer() {
-        val audioAttributes = AudioAttributes.Builder()
-            .setUsage(C.USAGE_MEDIA)
-            .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
-            .build()
-
-        exoPlayer = ExoPlayer.Builder(this)
-            .setAudioAttributes(audioAttributes, true)
-            .setHandleAudioBecomingNoisy(true)
-            .build().apply {
-                setWakeMode(C.WAKE_MODE_LOCAL)
-                addListener(object : Player.Listener {
-                    override fun onPlaybackStateChanged(state: Int) {
-                        if (state == Player.STATE_READY) {
-                            binding.seekBar.max = duration.toInt().coerceAtLeast(100)
-                            applyAudioEffects()
-                            updateProgressUI()
-                        } else if (state == Player.STATE_ENDED) {
-                            val book = currentBook ?: return
-                            if (currentChapterIndex + 1 < book.chapters.size) {
-                                playChapter(currentChapterIndex + 1, 0L, true)
-                            } else {
-                                getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-                                    .edit().putString("status_${book.folder.absolutePath}", "finished").apply()
-                                binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
-                                playerService?.stopForegroundPlayer()
-                            }
-                        }
-                    }
-
-                    override fun onPlayerError(error: PlaybackException) {
-                        Toast.makeText(this@MainActivity, "Ошибка воспроизведения: ${error.message}", Toast.LENGTH_LONG).show()
-                    }
-                })
-            }
+    override fun onResume() {
+        super.onResume()
+        val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
+        playbackSpeed = prefs.getFloat("playback_speed", 1.0f)
+        id3Mode = prefs.getInt("id3_mode", 0).coerceIn(0, 2)
+        binding.btnSpeed.text = String.format(Locale.US, "%.1fx", playbackSpeed)
+        binding.btnId3Mode.text = id3Labels.get(id3Mode)
+        applyToolbarVisibility()
+        refreshChapterTitleDisplay()
+        handler.post(updateRunnable)
     }
 
-    private fun checkStoragePermissionAndLoad() {
+    override fun onPause() {
+        super.onPause()
+        saveBookState()
+        handler.removeCallbacks(updateRunnable)
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel("abplayer_channel", "Воспроизведение книг", NotificationManager.IMPORTANCE_LOW)
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(channel)
+        }
+    }
+
+    private fun checkStoragePermission() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), 101)
-        } else {
-            loadLibraryFromSavedRoot()
         }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 101 && grantResults.isNotEmpty() && grantResults.get(0) == PackageManager.PERMISSION_GRANTED) {
-            loadLibraryFromSavedRoot()
-        } else {
-            Toast.makeText(this, "Нужно разрешение на чтение памяти для поиска книг", Toast.LENGTH_LONG).show()
+            syncWithRunningServiceOrLoadSaved()
         }
     }
 
     private fun setupListeners() {
-        binding.btnSettings.setOnClickListener { showMainSettingsMenu() }
-        binding.btnLibrary.setOnClickListener { showLibraryDialog() }
-        binding.btnPlayPause.setOnClickListener { togglePlayPause() }
+        binding.btnLibrary.setOnClickListener {
+            libraryLauncher.launch(Intent(this, LibraryActivity::class.java))
+        }
+        binding.btnSettings.setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
 
+        // Переключение режимов ID3: Имя файла -> UTF-8 -> Windows-1251
+        binding.btnId3Mode.setOnClickListener {
+            id3Mode = (id3Mode + 1) % 3
+            getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE).edit().putInt("id3_mode", id3Mode).apply()
+            binding.btnId3Mode.text = id3Labels.get(id3Mode)
+            refreshChapterTitleDisplay()
+        }
+
+        binding.btnPlayPause.setOnClickListener { togglePlayPause() }
         binding.btnRew1m.setOnClickListener { seekRelative(-60000L) }
         binding.btnRew10s.setOnClickListener { seekRelative(-10000L) }
         binding.btnFwd10s.setOnClickListener { seekRelative(10000L) }
@@ -172,17 +191,47 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         binding.btnLock.setOnClickListener {
             isLocked = !isLocked
             binding.seekBar.isEnabled = !isLocked
+            binding.seekBarBook.isEnabled = !isLocked
             binding.btnLock.setColorFilter(if (isLocked) Color.parseColor("#4DA6FF") else Color.parseColor("#CCCCCC"))
             Toast.makeText(this, if (isLocked) "Перемотка заблокирована" else "Перемотка разблокирована", Toast.LENGTH_SHORT).show()
         }
 
+        // Нижний ползунок: точная перемотка внутри текущей главы
         binding.seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 if (fromUser && !isLocked) {
-                    recordHistory("Перемотка")
-                    exoPlayer?.seekTo(progress.toLong())
+                    recordHistory("Перемотка по главе")
+                    playerService?.exoPlayer?.seekTo(progress.toLong())
                     saveBookState()
                     updateProgressUI()
+                }
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+
+        // Верхний ползунок: грубая перемотка по всей книге (с переходом между главами)
+        binding.seekBarBook.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser && !isLocked) {
+                    val book = currentBook ?: return
+                    val targetBookMs = (book.totalDurationMs * progress) / 1000L
+                    var acc = 0L
+                    for (i in book.chapters.indices) {
+                        val chapDur = book.chapters.get(i).durationMs
+                        if (targetBookMs < acc + chapDur || i == book.chapters.size - 1) {
+                            val offsetInChap = (targetBookMs - acc).coerceAtLeast(0L)
+                            val wasPlaying = playerService?.exoPlayer?.isPlaying == true
+                            if (i != currentChapterIndex) {
+                                playChapter(i, offsetInChap, wasPlaying)
+                            } else {
+                                playerService?.exoPlayer?.seekTo(offsetInChap)
+                                updateProgressUI()
+                            }
+                            break
+                        }
+                        acc += chapDur
+                    }
                 }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
@@ -196,150 +245,90 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         binding.btnCharacters.setOnClickListener { showCharactersDialog() }
         binding.btnHistory.setOnClickListener { showHistoryDialog() }
     }
-    private fun showMainSettingsMenu() {
-        val options = arrayOf(
-            "📁 Выбрать корневую папку с книгами",
-            "👁 Настройка отображаемых кнопок",
-            "⏪ Автоперемотка назад после паузы ($autoRewindSec сек)"
-        )
-        AlertDialog.Builder(this)
-            .setTitle("Настройки ABPlayer")
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> showFolderPickerDialog(Environment.getExternalStorageDirectory())
-                    1 -> showToolbarSettingsDialog()
-                    2 -> showAutoRewindDialog()
-                }
-            }
-            .show()
-    }
-
-    private fun showAutoRewindDialog() {
-        val values = arrayOf("Выключено (0 сек)", "5 секунд", "10 секунд", "20 секунд", "30 секунд")
-        val secs = intArrayOf(0, 5, 10, 20, 30)
-        AlertDialog.Builder(this)
-            .setTitle("Автоперемотка после паузы")
-            .setItems(values) { _, which ->
-                autoRewindSec = secs.get(which)
-                getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE).edit().putInt("auto_rewind", autoRewindSec).apply()
-            }
-            .show()
-    }
-
-    private fun showFolderPickerDialog(currentDir: File) {
-        val dirs = currentDir.listFiles()?.filter { it.isDirectory && !it.name.startsWith(".") }?.sortedBy { it.name.lowercase() } ?: emptyList()
-        val items = mutableListOf("✅ ВЫБРАТЬ ЭТУ ПАПКУ (${currentDir.name})")
-        if (currentDir.parentFile != null && currentDir.parentFile!!.canRead()) {
-            items.add("⬆ .. (Назад)")
-        }
-        dirs.forEach { items.add("📁 ${it.name}") }
-
-        AlertDialog.Builder(this)
-            .setTitle(currentDir.absolutePath)
-            .setItems(items.toTypedArray()) { _, which ->
-                if (which == 0) {
-                    getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE).edit().putString("root_folder", currentDir.absolutePath).apply()
-                    loadLibraryFromSavedRoot()
-                } else if (items.get(which).startsWith("⬆")) {
-                    currentDir.parentFile?.let { showFolderPickerDialog(it) }
-                } else {
-                    val dirName = items.get(which).removePrefix("📁 ")
-                    showFolderPickerDialog(File(currentDir, dirName))
-                }
-            }
-            .show()
-    }
-
-    private fun loadLibraryFromSavedRoot() {
+    private fun syncWithRunningServiceOrLoadSaved() {
         val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-        val rootPath = prefs.getString("root_folder", null) ?: return
-        val rootDir = File(rootPath)
-        if (!rootDir.exists() || !rootDir.isDirectory) return
+        val lastBookPath = prefs.getString("last_book_path", null) ?: return
+        val folder = File(lastBookPath)
+        if (!folder.exists() || !folder.isDirectory) return
 
-        booksList.clear()
-        val foldersToScan = mutableListOf<File>()
-        foldersToScan.add(rootDir)
-        rootDir.listFiles()?.filter { it.isDirectory }?.forEach { foldersToScan.add(it) }
+        val isAlreadyPlaying = playerService?.exoPlayer?.isPlaying == true
+        loadSingleBook(folder, autoPlay = false, keepRunningService = isAlreadyPlaying)
+    }
+
+    private fun loadSingleBook(folder: File, autoPlay: Boolean, keepRunningService: Boolean = false) {
+        val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
+        val audioFiles = folder.listFiles()
+            ?.filter { it.isFile && audioExtensions.contains(it.extension.lowercase()) }
+            ?.sortedWith(compareBy({ it.name.length }, { it.name.lowercase() })) ?: return
+
+        if (audioFiles.isEmpty()) return
 
         val retriever = MediaMetadataRetriever()
-        for (folder in foldersToScan) {
-            val audioFiles = folder.listFiles()
-                ?.filter { it.isFile && audioExtensions.contains(it.extension.lowercase()) }
-                ?.sortedWith(compareBy({ it.name.length }, { it.name.lowercase() })) ?: continue
-
-            if (audioFiles.isNotEmpty()) {
-                val chapters = audioFiles.map { file ->
-                    val dur = try {
-                        retriever.setDataSource(file.absolutePath)
-                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                    } catch (e: Exception) { 0L }
-                    ChapterItem(file, dur)
-                }
-                val totalDur = chapters.sumOf { it.durationMs }
-                val cover = folder.listFiles()?.firstOrNull {
-                    it.isFile && (it.extension.lowercase() == "jpg" || it.extension.lowercase() == "png")
-                }
-                booksList.add(BookItem(folder, folder.name, chapters, totalDur, cover))
-            }
+        val chapters = audioFiles.map { file ->
+            var dur = 0L
+            var titleTag: String? = null
+            try {
+                retriever.setDataSource(file.absolutePath)
+                dur = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                titleTag = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
+            } catch (_: Exception) {}
+            ChapterItem(file, dur, titleTag)
         }
         try { retriever.release() } catch (_: Exception) {}
 
-        val lastBookPath = prefs.getString("last_book_path", null)
-        val bookToOpen = booksList.firstOrNull { it.folder.absolutePath == lastBookPath } ?: booksList.firstOrNull()
-        if (bookToOpen != null) {
-            openBook(bookToOpen, autoPlay = false)
-        } else {
-            Toast.makeText(this, "В выбранной папке аудиофайлы не найдены", Toast.LENGTH_SHORT).show()
+        val totalDur = chapters.sumOf { it.durationMs }
+        val cover = folder.listFiles()?.firstOrNull {
+            it.isFile && (it.extension.lowercase() == "jpg" || it.extension.lowercase() == "png")
         }
-    }
 
-    private fun showLibraryDialog() {
-        if (booksList.isEmpty()) {
-            Toast.makeText(this, "Сначала выберите папку с книгами в настройках", Toast.LENGTH_SHORT).show()
-            showFolderPickerDialog(Environment.getExternalStorageDirectory())
-            return
-        }
-        val categories = arrayOf("📚 Все книги (${booksList.size})", "🆕 Новые", "🎧 Начатые", "✅ Прочитанные")
-        AlertDialog.Builder(this)
-            .setTitle("Библиотека")
-            .setItems(categories) { _, catIndex ->
-                val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-                val filtered = booksList.filter { book ->
-                    val status = prefs.getString("status_${book.folder.absolutePath}", "new")
-                    when (catIndex) {
-                        1 -> status == "new"
-                        2 -> status == "started"
-                        3 -> status == "finished"
-                        else -> true
-                    }
-                }
-                if (filtered.isEmpty()) {
-                    Toast.makeText(this, "В этой вкладке пусто", Toast.LENGTH_SHORT).show()
-                } else {
-                    val titles = filtered.map { "${it.title} (${it.chapters.size} гл.)" }.toTypedArray()
-                    AlertDialog.Builder(this)
-                        .setTitle(categories.get(catIndex))
-                        .setItems(titles) { _, idx -> openBook(filtered.get(idx), autoPlay = true) }
-                        .show()
-                }
-            }
-            .show()
-    }
-    private fun openBook(book: BookItem, autoPlay: Boolean) {
+        val book = BookItem(folder, folder.name, chapters, totalDur, cover)
         currentBook = book
-        val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-        prefs.edit().putString("last_book_path", book.folder.absolutePath).apply()
+        prefs.edit().putString("last_book_path", folder.absolutePath).apply()
 
         binding.tvBookTitle.text = book.title
-        if (book.coverFile != null) {
-            binding.ivCover.setImageBitmap(BitmapFactory.decodeFile(book.coverFile.absolutePath))
+        if (cover != null) {
+            binding.ivCover.setImageBitmap(BitmapFactory.decodeFile(cover.absolutePath))
         } else {
             binding.ivCover.setImageDrawable(null)
         }
 
-        val savedChapter = prefs.getInt("chap_${book.folder.absolutePath}", 0).coerceIn(0, book.chapters.size - 1)
-        val savedPos = prefs.getLong("pos_ms_${book.folder.absolutePath}", 0L)
-        playChapter(savedChapter, savedPos, autoPlay)
+        val savedChapter = prefs.getInt("chap_${folder.absolutePath}", 0).coerceIn(0, chapters.size - 1)
+        val savedPos = prefs.getLong("pos_ms_${folder.absolutePath}", 0L)
+        currentChapterIndex = savedChapter
+
+        if (keepRunningService) {
+            refreshChapterTitleDisplay()
+            updateProgressUI()
+        } else {
+            playChapter(savedChapter, savedPos, autoPlay)
+        }
+    }
+
+    private fun formatChapterDisplayTitle(index: Int, chapter: ChapterItem): String {
+        val raw = chapter.rawTitle?.trim()
+        val title = when (id3Mode) {
+            1 -> if (!raw.isNullOrEmpty()) raw else chapter.file.nameWithoutExtension
+            2 -> if (!raw.isNullOrEmpty()) {
+                try {
+                    String(raw.toByteArray(Charsets.ISO_8859_1), Charset.forName("windows-1251"))
+                } catch (_: Exception) { raw }
+            } else chapter.file.nameWithoutExtension
+            else -> chapter.file.nameWithoutExtension
+        }
+        val total = currentBook?.chapters?.size ?: 1
+        return "${index + 1}/$total: $title"
+    }
+
+    private fun refreshChapterTitleDisplay() {
+        val book = currentBook ?: return
+        if (currentChapterIndex in book.chapters.indices) {
+            val text = formatChapterDisplayTitle(currentChapterIndex, book.chapters.get(currentChapterIndex))
+            binding.tvChapterTitle.text = text
+            playerService?.let {
+                it.currentChapterTitle = text
+                it.updateMediaSessionAndNotification()
+            }
+        }
     }
 
     private fun playChapter(index: Int, startPosMs: Long, autoPlay: Boolean) {
@@ -347,53 +336,54 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         if (index !in book.chapters.indices) return
         currentChapterIndex = index
         val chapter = book.chapters.get(index)
+        val chapTitle = formatChapterDisplayTitle(index, chapter)
 
-        val player = exoPlayer ?: return
-        val mediaItem = MediaItem.fromUri(Uri.fromFile(chapter.file))
-        player.setMediaItem(mediaItem)
-        player.prepare()
-        if (startPosMs > 0L) {
-            player.seekTo(startPosMs)
-        }
-        player.playbackParameters = PlaybackParameters(playbackSpeed)
-
-        val chapText = "${index + 1}/${book.chapters.size}: ${chapter.file.nameWithoutExtension}"
-        binding.tvChapterTitle.text = chapText
+        binding.tvChapterTitle.text = chapTitle
+        binding.seekBar.max = chapter.durationMs.toInt().coerceAtLeast(100)
         binding.seekBar.progress = startPosMs.toInt()
+        binding.tvChapterDuration.text = formatTime(chapter.durationMs)
+
+        playerService?.playFile(
+            file = chapter.file,
+            bookTitle = book.title,
+            chapterTitle = chapTitle,
+            coverPath = book.coverFile?.absolutePath,
+            startPosMs = startPosMs,
+            speed = playbackSpeed,
+            autoPlay = autoPlay
+        )
 
         if (autoPlay) {
-            startPlayback()
+            getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
+                .edit().putString("status_${book.folder.absolutePath}", "started").apply()
+            binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
+            handler.post(updateRunnable)
         } else {
-            player.pause()
             binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
         }
         updateProgressUI()
     }
 
     private fun togglePlayPause() {
-        val player = exoPlayer ?: return
+        val player = playerService?.exoPlayer ?: return
+        val book = currentBook ?: return
         if (player.isPlaying) {
             player.pause()
             saveBookState()
             binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
             handler.removeCallbacks(updateRunnable)
-            playerService?.stopForegroundPlayer()
         } else {
-            if (autoRewindSec > 0 && player.currentPosition > autoRewindSec * 1000L) {
-                player.seekTo(player.currentPosition - autoRewindSec * 1000L)
+            val autoRewind = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE).getInt("auto_rewind", 10)
+            if (autoRewind > 0 && player.currentPosition > autoRewind * 1000L) {
+                player.seekTo(player.currentPosition - autoRewind * 1000L)
             }
-            startPlayback()
+            getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
+                .edit().putString("status_${book.folder.absolutePath}", "started").apply()
+            player.play()
+            binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
+            handler.post(updateRunnable)
         }
-    }
-
-    private fun startPlayback() {
-        val book = currentBook ?: return
-        getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-            .edit().putString("status_${book.folder.absolutePath}", "started").apply()
-        exoPlayer?.play()
-        binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
-        playerService?.startForegroundPlayer(book.title, binding.tvChapterTitle.text.toString())
-        handler.post(updateRunnable)
+        playerService?.updateMediaSessionAndNotification()
     }
 
     private fun seekRelative(deltaMs: Long) {
@@ -401,20 +391,20 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             Toast.makeText(this, "Сначала разблокируйте замок сверху", Toast.LENGTH_SHORT).show()
             return
         }
-        val player = exoPlayer ?: return
+        val player = playerService?.exoPlayer ?: return
         val dur = player.duration
         if (dur <= 0L) return
         recordHistory(if (deltaMs < 0) "Назад" else "Вперед")
         val target = (player.currentPosition + deltaMs).coerceIn(0L, dur - 200L)
         player.seekTo(target)
-        binding.seekBar.progress = target.toInt()
         saveBookState()
         updateProgressUI()
+        playerService?.updateMediaSessionAndNotification()
     }
 
     private val updateRunnable = object : Runnable {
         override fun run() {
-            if (exoPlayer?.isPlaying == true) {
+            if (playerService?.exoPlayer?.isPlaying == true) {
                 updateProgressUI()
                 saveBookState()
                 handler.postDelayed(this, 1000)
@@ -424,9 +414,14 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private fun updateProgressUI() {
         val book = currentBook ?: return
-        val player = exoPlayer ?: return
+        val player = playerService?.exoPlayer ?: return
         val curPos = player.currentPosition.coerceAtLeast(0L)
+        val chapDur = player.duration.coerceAtLeast(1L)
+
+        binding.seekBar.max = chapDur.toInt()
         binding.seekBar.progress = curPos.toInt()
+        binding.tvChapterElapsed.text = formatTime(curPos)
+        binding.tvChapterDuration.text = formatTime(chapDur)
 
         var readMs = 0L
         for (i in 0 until currentChapterIndex) {
@@ -437,31 +432,39 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         val leftMs = (totalMs - readMs).coerceAtLeast(0L)
         val percent = ((readMs * 100) / totalMs).toInt().coerceIn(0, 100)
 
-        binding.tvTotalProgress.text = "Read ${formatTime(readMs)} of ${formatTime(totalMs)}   $percent%   Left ${formatTime(leftMs)}"
+        binding.seekBarBook.progress = ((readMs * 1000L) / totalMs).toInt().coerceIn(0, 1000)
+        binding.tvTotalProgress.text = getString(
+            R.string.progress_format,
+            formatTime(readMs),
+            formatTime(totalMs),
+            percent,
+            formatTime(leftMs)
+        )
     }
 
     private fun saveBookState() {
         val book = currentBook ?: return
-        val pos = exoPlayer?.currentPosition ?: return
+        val pos = playerService?.exoPlayer?.currentPosition ?: return
         getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE).edit()
             .putInt("chap_${book.folder.absolutePath}", currentChapterIndex)
             .putLong("pos_ms_${book.folder.absolutePath}", pos)
             .apply()
     }
     private fun applyAudioEffects() {
-        val sessionId = exoPlayer?.audioSessionId ?: return
+        val service = playerService ?: return
+        val sessionId = service.exoPlayer?.audioSessionId ?: return
         if (sessionId == C.AUDIO_SESSION_ID_UNSET) return
         try {
-            loudnessEnhancer?.release()
-            loudnessEnhancer = LoudnessEnhancer(sessionId).apply {
+            service.loudnessEnhancer?.release()
+            service.loudnessEnhancer = LoudnessEnhancer(sessionId).apply {
                 setTargetGain(boostGainMb)
                 enabled = boostGainMb > 0
             }
         } catch (_: Exception) {}
 
         try {
-            equalizer?.release()
-            equalizer = Equalizer(0, sessionId).apply {
+            service.equalizer?.release()
+            service.equalizer = Equalizer(0, sessionId).apply {
                 enabled = true
                 val bands = numberOfBands.toInt()
                 val minLevel = bandLevelRange.get(0)
@@ -501,7 +504,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             text = "\nПрофиль эквалайзера:"
             setPadding(0, 16, 0, 8)
         }
-        val presets = arrayOf("Обычный (ровный)", "🗣 Четкая речь (убрать гул)", "🔊 Глубокий бас")
+        val presets = arrayOf("Обычный (ровный)", "Четкая речь (убрать гул)", "Глубокий бас")
         val radioGroup = RadioGroup(this).apply {
             presets.forEachIndexed { idx, title ->
                 val rb = RadioButton(this@MainActivity).apply {
@@ -537,7 +540,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 playbackSpeed = vals.get(which)
                 binding.btnSpeed.text = speeds.get(which)
                 getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE).edit().putFloat("playback_speed", playbackSpeed).apply()
-                exoPlayer?.playbackParameters = PlaybackParameters(playbackSpeed)
+                playerService?.exoPlayer?.playbackParameters = PlaybackParameters(playbackSpeed)
             }
             .show()
     }
@@ -570,7 +573,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         sleepTimer = object : CountDownTimer(durationMs, 1000) {
             override fun onTick(millisUntilFinished: Long) { sleepRemainingMs = millisUntilFinished }
             override fun onFinish() {
-                if (exoPlayer?.isPlaying == true) togglePlayPause()
+                if (playerService?.exoPlayer?.isPlaying == true) togglePlayPause()
                 binding.btnSleep.setColorFilter(Color.parseColor("#CCCCCC"))
                 sensorManager.unregisterListener(this@MainActivity)
             }
@@ -596,13 +599,13 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         val book = currentBook ?: return
         val items = book.chapters.mapIndexed { idx, ch ->
             val mark = if (idx == currentChapterIndex) "▶ " else ""
-            "$mark${idx + 1}. ${ch.file.nameWithoutExtension} (${formatTime(ch.durationMs)})"
+            "$mark${formatChapterDisplayTitle(idx, ch)} (${formatTime(ch.durationMs)})"
         }.toTypedArray()
 
         AlertDialog.Builder(this)
             .setTitle("Главы книги (${book.chapters.size})")
             .setItems(items) { _, which -> playChapter(which, 0L, true) }
-            .setNeutralButton("🔖 Закладки") { _, _ -> showBookmarksDialog() }
+            .setNeutralButton("Закладки") { _, _ -> showBookmarksDialog() }
             .show()
     }
 
@@ -630,7 +633,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     .setTitle("Новая закладка")
                     .setView(input)
                     .setPositiveButton("Сохранить") { _, _ ->
-                        val pos = exoPlayer?.currentPosition ?: 0L
+                        val pos = playerService?.exoPlayer?.currentPosition ?: 0L
                         list.add("$currentChapterIndex|$pos|${input.text}")
                         prefs.edit().putString(key, list.joinToString(";;")).apply()
                         Toast.makeText(this, "Закладка сохранена", Toast.LENGTH_SHORT).show()
@@ -660,7 +663,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun recordHistory(action: String) {
-        val pos = exoPlayer?.currentPosition ?: return
+        val pos = playerService?.exoPlayer?.currentPosition ?: return
         positionHistory.add(0, "$action: Глава ${currentChapterIndex + 1} — ${formatTime(pos)}")
         if (positionHistory.size > 20) positionHistory.removeLast()
     }
@@ -685,18 +688,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         }
     }
 
-    private fun showToolbarSettingsDialog() {
-        val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-        val checkedItems = BooleanArray(buttonKeys.size) { i -> prefs.getBoolean(buttonKeys.get(i), true) }
-        AlertDialog.Builder(this)
-            .setTitle("Отображаемые кнопки")
-            .setMultiChoiceItems(buttonNames, checkedItems) { _, which, isChecked ->
-                prefs.edit().putBoolean(buttonKeys.get(which), isChecked).apply()
-            }
-            .setPositiveButton("Готово") { _, _ -> applyToolbarVisibility() }
-            .show()
-    }
-
     private fun formatTime(ms: Long): String {
         val totalSec = ms / 1000
         val h = totalSec / 3600
@@ -711,9 +702,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         saveBookState()
         handler.removeCallbacks(updateRunnable)
         sensorManager.unregisterListener(this)
-        exoPlayer?.release()
-        equalizer?.release()
-        loudnessEnhancer?.release()
-        try { unbindService(serviceConnection) } catch (_: Exception) {}
+        if (isBound) {
+            try { unbindService(serviceConnection) } catch (_: Exception) {}
+            isBound = false
+        }
     }
-}            
+}                    

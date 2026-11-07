@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#121212"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:background="#1F1F1F"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="8dp">
+
+        <ImageButton
+            android:id="@+id/btnBackSettings"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@android:drawable/ic_menu_revert"
+            app:tint="#FFFFFF" />
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:text="@string/settings_title"
+            android:textColor="#FFFFFF"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="ВОСПРОИЗВЕДЕНИЕ"
+                android:textColor="#4DA6FF"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:id="@+id/rowAutoRewind"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="?attr/selectableItemBackground"
+                android:orientation="vertical"
+                android:paddingVertical="10dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Автоперемотка после паузы"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp" />
+
+                <TextView
+                    android:id="@+id/tvAutoRewindDesc"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="Откат на 10 сек при возобновлении"
+                    android:textColor="#999999"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#262626" />
+
+            <LinearLayout
+                android:id="@+id/rowId3Default"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="?attr/selectableItemBackground"
+                android:orientation="vertical"
+                android:paddingVertical="10dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Режим названий глав (ID3)"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp" />
+
+                <TextView
+                    android:id="@+id/tvId3Desc"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="По именам файлов"
+                    android:textColor="#999999"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:text="ОТОБРАЖАЕМЫЕ КНОПКИ ПАНЕЛИ"
+                android:textColor="#4DA6FF"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <CheckBox
+                android:id="@+id/cbShowSleep"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Таймер сна (со встряхиванием)"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+            <CheckBox
+                android:id="@+id/cbShowAudio"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Звук, усиление и эквалайзер"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+            <CheckBox
+                android:id="@+id/cbShowChapters"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Список глав и закладки"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+            <CheckBox
+                android:id="@+id/cbShowSpeed"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Скорость воспроизведения"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+            <CheckBox
+                android:id="@+id/cbShowCharacters"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Блокнот персонажей"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+            <CheckBox
+                android:id="@+id/cbShowHistory"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="История позиций"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+            <CheckBox
+                android:id="@+id/cbShowLock"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Замок блокировки перемотки"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+        </LinearLayout>
+    </ScrollView>
+
+</LinearLayout>
