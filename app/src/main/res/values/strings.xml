@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ABPlayer</string>
+    <string name="select_folder_prompt">Выберите папку с книгами</string>
+    <string name="chapter_not_selected">Глава не выбрана</string>
+    <string name="progress_format">Прослушано: %1$s из %2$s (%3$d%%) • Осталось: %4$s</string>
+    <string name="library_title">Библиотека</string>
+    <string name="tab_all">ВСЕ</string>
+    <string name="tab_new">НОВЫЕ</string>
+    <string name="tab_started">НАЧАТЫЕ</string>
+    <string name="tab_finished">ПРОЧИТАННЫЕ</string>
+    <string name="settings_title">Настройки</string>
+    <string name="action_rew_10">-10с</string>
+    <string name="action_fwd_10">+10с</string>
+    <string name="action_play">Играть</string>
+    <string name="action_pause">Пауза</string>
+    <string name="action_stop">Закрыть</string>
+</resources>
