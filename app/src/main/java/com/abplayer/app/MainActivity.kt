@@ -30,6 +30,12 @@ import com.abplayer.app.databinding.ActivityMainBinding
 import java.io.File
 import java.util.Locale
 import kotlin.math.sqrt
+import android.content.ComponentName
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.IBinder
+import android.os.PowerManager
+import java.io.FileInputStream
 
 class MainActivity : AppCompatActivity(), SensorEventListener {
 
@@ -55,7 +61,16 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private var lastSleepDurationMs = 0L
     private lateinit var sensorManager: SensorManager
     private var lastShakeTime = 0L
-
+    private var playerService: PlayerService? = null
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as PlayerService.LocalBinder
+            playerService = binder.getService()
+        }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            playerService = null
+        }
+    }
     private val audioExtensions = setOf("mp3", "m4b", "m4a", "ogg", "flac", "wav", "aac", "opus")
     private val buttonKeys = arrayOf("show_sleep", "show_audio", "show_chapters", "show_speed", "show_characters", "show_history", "show_lock")
     private val buttonNames = arrayOf("Таймер сна", "Звук и эквалайзер", "Главы и закладки", "Скорость (1.0x)", "Персонажи", "История позиций", "Замок блокировки")
@@ -67,7 +82,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
-
+        val serviceIntent = Intent(this, PlayerService::class.java)
+        startService(serviceIntent)
+        bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
         autoRewindSec = prefs.getInt("auto_rewind", 10)
@@ -293,26 +310,42 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         equalizer?.release()
         loudnessEnhancer?.release()
 
-        mediaPlayer = MediaPlayer().apply {
-            setDataSource(chapter.file.absolutePath)
-            prepare()
-            seekTo(startPosMs)
-            setOnCompletionListener {
-                if (currentChapterIndex + 1 < book.chapters.size) {
-                    playChapter(currentChapterIndex + 1, 0, true)
-                } else {
-                    getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-                        .edit().putString("status_${book.folder.absolutePath}", "finished").apply()
-                    binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
+        try {
+            val fis = FileInputStream(chapter.file)
+            mediaPlayer = MediaPlayer().apply {
+                setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
+                setDataSource(fis.fd)
+                fis.close()
+                prepare()
+                if (startPosMs > 0 && startPosMs < duration) {
+                    seekTo(startPosMs)
+                }
+                setOnErrorListener { _, what, extra ->
+                    Toast.makeText(this@MainActivity, "Ошибка файла (${chapter.file.name}): $what/$extra", Toast.LENGTH_LONG).show()
+                    true
+                }
+                setOnCompletionListener {
+                    if (currentChapterIndex + 1 < book.chapters.size) {
+                        playChapter(currentChapterIndex + 1, 0, true)
+                    } else {
+                        getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
+                            .edit().putString("status_${book.folder.absolutePath}", "finished").apply()
+                        binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
+                        playerService?.stopForegroundPlayer()
+                    }
                 }
             }
+        } catch (e: Exception) {
+            Toast.makeText(this, "Не удалось открыть: ${chapter.file.name} (${e.message})", Toast.LENGTH_LONG).show()
+            return
         }
 
         applyAudioEffects()
         applyPlaybackSpeed()
 
-        binding.tvChapterTitle.text = "${index + 1}/${book.chapters.size}: ${chapter.file.nameWithoutExtension}"
-        binding.seekBar.max = mediaPlayer?.duration ?: 0
+        val chapText = "${index + 1}/${book.chapters.size}: ${chapter.file.nameWithoutExtension}"
+        binding.tvChapterTitle.text = chapText
+        binding.seekBar.max = mediaPlayer?.duration ?: 100
         binding.seekBar.progress = startPosMs
 
         if (autoPlay) {
@@ -322,6 +355,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         }
         updateProgressUI()
     }
+
     private fun togglePlayPause() {
         val mp = mediaPlayer ?: return
         if (mp.isPlaying) {
@@ -329,6 +363,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             saveBookState()
             binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
             handler.removeCallbacks(updateRunnable)
+            playerService?.stopForegroundPlayer()
         } else {
             if (autoRewindSec > 0 && mp.currentPosition > autoRewindSec * 1000) {
                 mp.seekTo(mp.currentPosition - autoRewindSec * 1000)
@@ -343,15 +378,22 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             .edit().putString("status_${book.folder.absolutePath}", "started").apply()
         mediaPlayer?.start()
         binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
+        playerService?.startForegroundPlayer(book.title, binding.tvChapterTitle.text.toString())
         handler.post(updateRunnable)
     }
 
     private fun seekRelative(deltaMs: Int) {
-        if (isLocked) return
+        if (isLocked) {
+            Toast.makeText(this, "Сначала разблокируйте замок сверху", Toast.LENGTH_SHORT).show()
+            return
+        }
         val mp = mediaPlayer ?: return
+        val dur = mp.duration
+        if (dur <= 0) return
         recordHistory(if (deltaMs < 0) "Назад" else "Вперед")
-        val target = (mp.currentPosition + deltaMs).coerceIn(0, mp.duration)
+        val target = (mp.currentPosition + deltaMs).coerceIn(0, dur - 500)
         mp.seekTo(target)
+        binding.seekBar.progress = target
         saveBookState()
         updateProgressUI()
     }
