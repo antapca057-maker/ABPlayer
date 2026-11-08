@@ -154,15 +154,40 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun checkStoragePermission() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), 101)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Логика для Android 13 и 14+
+            val permissionsNeeded = mutableListOf<String>()
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                permissionsNeeded.add(Manifest.permission.READ_MEDIA_AUDIO)
+            }
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                permissionsNeeded.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            if (permissionsNeeded.isNotEmpty()) {
+                ActivityCompat.requestPermissions(this, permissionsNeeded.toTypedArray(), 101)
+            } else {
+                loadLibraryFromSavedRoot()
+            }
+        } else {
+            // Логика для Android 6.0 — 12
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), 101)
+            } else {
+                loadLibraryFromSavedRoot()
+            }
         }
     }
 
+
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 101 && grantResults.isNotEmpty() && grantResults.get(0) == PackageManager.PERMISSION_GRANTED) {
-            syncWithRunningServiceOrLoadSaved()
+        if (requestCode == 101 && grantResults.isNotEmpty()) {
+            val allGranted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            if (allGranted) {
+                loadLibraryFromSavedRoot()
+            } else {
+                Toast.makeText(this, "Нужно одобрить разрешения для работы с аудиокнигами", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
