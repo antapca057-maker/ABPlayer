@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Темный фон иконки -->
+    <path
+        android:fillColor="#1A1A1A"
+        android:pathData="M24,10 L84,10 A14,14 0 0,1 98,24 L98,84 A14,14 0 0,1 84,98 L24,98 A14,14 0 0,1 10,84 L10,24 A14,14 0 0,1 24,10 Z" />
+
+    <!-- Силуэт книги (голубой) -->
+    <path
+        android:fillColor="#4DA6FF"
+        android:pathData="M34,26 L70,26 C73.3,26 76,28.7 76,32 L76,76 C76,79.3 73.3,82 70,82 L34,82 C30.7,82 28,79.3 28,76 L28,32 C28,28.7 30.7,26 34,26 Z M36,34 L36,74 L68,74 L68,34 L36,34 Z" />
+
+    <!-- Треугольник Play внутри книги (белый) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M46,43 L62,54 L46,65 Z" />
+</vector>

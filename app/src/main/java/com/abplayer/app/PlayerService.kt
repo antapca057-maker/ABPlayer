@@ -1,5 +1,7 @@
 package com.abplayer.app
 
+import android.os.SystemClock
+import android.view.KeyEvent
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
@@ -33,6 +35,9 @@ class PlayerService : Service() {
     var equalizer: Equalizer? = null
     var loudnessEnhancer: LoudnessEnhancer? = null
     private lateinit var mediaSession: MediaSessionCompat
+    private var headsetClickCount = 0
+    private var lastHeadsetClickTime = 0L
+
 
     var currentBookTitle: String = "ABPlayer"
     var currentChapterTitle: String = ""
@@ -65,6 +70,36 @@ class PlayerService : Service() {
                 }
                 override fun onFastForward() {
                     seekBy(10000L)
+                }
+                override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+                    val keyEvent = mediaButtonEvent?.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+                    if (keyEvent?.action == KeyEvent.ACTION_DOWN &&
+                        (keyEvent.keyCode == KeyEvent.KEYCODE_HEADSETHOOK || keyEvent.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+                    ) {
+                        val now = SystemClock.elapsedRealtime()
+                        if (now - lastHeadsetClickTime < 500L) {
+                            headsetClickCount++
+                        } else {
+                            headsetClickCount = 1
+                        }
+                        lastHeadsetClickTime = now
+
+                        when (headsetClickCount) {
+                            1 -> exoPlayer?.let { if (it.isPlaying) it.pause() else it.play() }
+                            2 -> {
+                                // Отменяем паузу от первого клика и мотаем вперед
+                                exoPlayer?.play()
+                                seekBy(10000L)
+                            }
+                            3 -> {
+                                exoPlayer?.play()
+                                seekBy(-10000L)
+                            }
+                        }
+                        updateMediaSessionAndNotification()
+                        return true
+                    }
+                    return super.onMediaButtonEvent(mediaButtonEvent)
                 }
             })
             isActive = true

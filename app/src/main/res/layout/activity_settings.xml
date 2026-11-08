@@ -173,6 +173,68 @@
                 android:text="Замок блокировки перемотки"
                 android:textColor="#FFFFFF"
                 android:textSize="15sp" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:text="РЕЗЕРВНОЕ КОПИРОВАНИЕ"
+                android:textColor="#4DA6FF"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:id="@+id/rowExportBackup"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="?attr/selectableItemBackground"
+                android:orientation="vertical"
+                android:paddingVertical="10dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Экспорт прогресса и закладок"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="Сохранить в Download/ABPlayer_backup.json"
+                    android:textColor="#999999"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#262626" />
+
+            <LinearLayout
+                android:id="@+id/rowImportBackup"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="?attr/selectableItemBackground"
+                android:orientation="vertical"
+                android:paddingVertical="10dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Импорт прогресса из файла"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="Восстановить из Download/ABPlayer_backup.json"
+                    android:textColor="#999999"
+                    android:textSize="13sp" />
+            </LinearLayout>    
 
         </LinearLayout>
     </ScrollView>
