@@ -3,11 +3,10 @@
 **ABPlayer** — лёгкий, быстрый и автономный офлайн-плеер для прослушивания аудиокниг на устройствах Android (начиная с **Android 6.0 / API 23**), вдохновлённый классическими специализированными плеерами вроде Smart AudioBook Player.
 
 <p align="left">
-  <img src="https://github.com" width="220" />
-  <img src="https://github.com" width="220" />
-  <img src="https://github.com" width="220" />
+  <img src="https://github.com/user-attachments/assets/59bf235e-8ce7-48b4-ab14-c430e1c6ea04" width="220" />
+  <img src="https://github.com/user-attachments/assets/32265572-dfab-434f-8b06-d52dd5a7e93e" width="220" />
+  <img src="https://github.com/user-attachments/assets/0ae5b280-a91b-4331-af01-f5edcb9459e1" width="220" />
 </p>
-
 
 Весь исходный код написан с нуля на Kotlin с использованием движка **Google ExoPlayer**.
 
