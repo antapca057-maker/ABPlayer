@@ -140,7 +140,7 @@ class LibraryActivity : AppCompatActivity() {
             val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
             showFolderPickerDialog(if (musicDir.exists()) musicDir else Environment.getExternalStorageDirectory())
             return
-        
+        }
         val rootDir = File(rootPath)
         if (!rootDir.exists() || !rootDir.isDirectory) return
 
@@ -152,8 +152,8 @@ class LibraryActivity : AppCompatActivity() {
         val retriever = MediaMetadataRetriever()
         for (folder in foldersToScan) {
             val audioFiles = folder.listFiles()
-                ?.filter { it.isFile && audioExtensions.contains(it.extension.lowercase()) }
-                ?.sortedWith(compareBy({ it.name.length }, { it.name.lowercase() })) ?: continue
+                ?.filter { it.isFile && audioExtensions.contains(it.extension.lowercase(java.util.Locale.ROOT)) }
+                ?.sortedWith(compareBy({ it.name.length }, { it.name.lowercase(java.util.Locale.ROOT) })) ?: continue
 
             if (audioFiles.isNotEmpty()) {
                 val durations = audioFiles.map { file ->
@@ -171,7 +171,7 @@ class LibraryActivity : AppCompatActivity() {
 
                 val status = prefs.getString("status_${folder.absolutePath}", "new") ?: "new"
                 val cover = folder.listFiles()?.firstOrNull {
-                    it.isFile && (it.extension.lowercase() == "jpg" || it.extension.lowercase() == "png")
+                    it.isFile && (it.extension.lowercase(java.util.Locale.ROOT) == "jpg" || it.extension.lowercase(java.util.Locale.ROOT) == "png")
                 }?.absolutePath
 
                 allBooks.add(BookDisplayItem(folder.absolutePath, folder.name, audioFiles.size, totalDur, readMs, status, cover))
