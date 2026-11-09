@@ -105,7 +105,10 @@ class LibraryActivity : AppCompatActivity() {
         scanBooks()
     }
     private fun showFolderPickerDialog(currentDir: File) {
-        val dirs = currentDir.listFiles()?.filter { it.isDirectory && !it.name.startsWith(".") }?.sortedBy { it.name.lowercase() } ?: emptyList()
+        val rawFiles = currentDir.listFiles()
+        val dirs = rawFiles?.filter { it.isDirectory && !it.name.startsWith(".") }
+            ?.sortedWith(compareBy { it.name.lowercase(java.util.Locale.ROOT) }) ?: emptyList()
+            
         val items = mutableListOf("✅ ВЫБРАТЬ ЭТУ ПАПКУ (${currentDir.name})")
         if (currentDir.parentFile != null && currentDir.parentFile!!.canRead()) {
             items.add("⬆ .. (Назад)")
@@ -134,9 +137,10 @@ class LibraryActivity : AppCompatActivity() {
         val rootPath = prefs.getString("root_folder", null)
         if (rootPath == null) {
             Toast.makeText(this, "Выберите корневую папку с книгами", Toast.LENGTH_SHORT).show()
-            showFolderPickerDialog(Environment.getExternalStorageDirectory())
+            val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+            showFolderPickerDialog(if (musicDir.exists()) musicDir else Environment.getExternalStorageDirectory())
             return
-        }
+        
         val rootDir = File(rootPath)
         if (!rootDir.exists() || !rootDir.isDirectory) return
 
