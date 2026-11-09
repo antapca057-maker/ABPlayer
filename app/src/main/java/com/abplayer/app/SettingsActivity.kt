@@ -3,12 +3,11 @@ package com.abplayer.app
 import android.app.AlertDialog
 import android.content.Context
 import android.os.Bundle
-import android.os.Environment
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.abplayer.app.databinding.ActivitySettingsBinding
 import org.json.JSONObject
-import java.io.File
 
 class SettingsActivity : AppCompatActivity() {
 
@@ -79,60 +78,63 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
 
-        // Экспорт бэкапа в Download/ABPlayer_backup.json
-        binding.rowExportBackup.setOnClickListener {
-            try {
-                val json = JSONObject()
-                for ((k, v) in prefs.all) {
-                    when (v) {
-                        is Boolean -> json.put(k, JSONObject().put("t", "B").put("v", v))
-                        is Int -> json.put(k, JSONObject().put("t", "I").put("v", v))
-                        is Long -> json.put(k, JSONObject().put("t", "L").put("v", v))
-                        is Float -> json.put(k, JSONObject().put("t", "F").put("v", v.toDouble()))
-                        is String -> json.put(k, JSONObject().put("t", "S").put("v", v))
+        val exportBackupLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+            if (uri != null) {
+                try {
+                    val json = JSONObject()
+                    for ((key, value) in prefs.all) {
+                        when (value) {
+                            is Boolean -> json.put(key, JSONObject().put("t", "B").put("v", value))
+                            is Int -> json.put(key, JSONObject().put("t", "I").put("v", value))
+                            is Long -> json.put(key, JSONObject().put("t", "L").put("v", value))
+                            is Float -> json.put(key, JSONObject().put("t", "F").put("v", value.toDouble()))
+                            is String -> json.put(key, JSONObject().put("t", "S").put("v", value))
+                        }
                     }
+                    contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(json.toString(2)) }
+                        ?: throw IllegalStateException("Не удалось открыть файл для записи")
+                    Toast.makeText(this, "Резервная копия сохранена", Toast.LENGTH_LONG).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Ошибка экспорта: ${e.message}", Toast.LENGTH_LONG).show()
                 }
-                val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                if (!downloadDir.exists()) downloadDir.mkdirs()
-                val backupFile = File(downloadDir, "ABPlayer_backup.json")
-                backupFile.writeText(json.toString(2))
-                Toast.makeText(this, "Сохранено в ${backupFile.absolutePath}", Toast.LENGTH_LONG).show()
-            } catch (e: Exception) {
-                Toast.makeText(this, "Ошибка экспорта: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
 
-        // Импорт бэкапа из Download/ABPlayer_backup.json
-        binding.rowImportBackup.setOnClickListener {
-            try {
-                val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                val backupFile = File(downloadDir, "ABPlayer_backup.json")
-                if (!backupFile.exists()) {
-                    Toast.makeText(this, "Файл ABPlayer_backup.json в папке Download не найден", Toast.LENGTH_LONG).show()
-                    return@setOnClickListener
-                }
-                val json = JSONObject(backupFile.readText())
-                val editor = prefs.edit()
-                val keys = json.keys()
-                while (keys.hasNext()) {
-                    val k = keys.next()
-                    val obj = json.getJSONObject(k)
-                    when (obj.getString("t")) {
-                        "B" -> editor.putBoolean(k, obj.getBoolean("v"))
-                        "I" -> editor.putInt(k, obj.getInt("v"))
-                        "L" -> editor.putLong(k, obj.getLong("v"))
-                        "F" -> editor.putFloat(k, obj.getDouble("v").toFloat())
-                        "S" -> editor.putString(k, obj.getString("v"))
+        val importBackupLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) {
+                try {
+                    val json = contentResolver.openInputStream(uri)?.bufferedReader()?.use { JSONObject(it.readText()) }
+                        ?: throw IllegalStateException("Не удалось открыть файл")
+                    val editor = prefs.edit()
+                    val keys = json.keys()
+                    while (keys.hasNext()) {
+                        val key = keys.next()
+                        val obj = json.getJSONObject(key)
+                        when (obj.getString("t")) {
+                            "B" -> editor.putBoolean(key, obj.getBoolean("v"))
+                            "I" -> editor.putInt(key, obj.getInt("v"))
+                            "L" -> editor.putLong(key, obj.getLong("v"))
+                            "F" -> editor.putFloat(key, obj.getDouble("v").toFloat())
+                            "S" -> editor.putString(key, obj.getString("v"))
+                        }
                     }
+                    editor.apply()
+                    updateAutoRewindText()
+                    updateId3Text()
+                    for ((checkBox, key) in checkBoxes) checkBox.isChecked = prefs.getBoolean(key, true)
+                    Toast.makeText(this, "Прогресс и закладки успешно восстановлены!", Toast.LENGTH_LONG).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Ошибка импорта: ${e.message}", Toast.LENGTH_LONG).show()
                 }
-                editor.apply()
-                updateAutoRewindText()
-                updateId3Text()
-                for ((cb, key) in checkBoxes) cb.isChecked = prefs.getBoolean(key, true)
-                Toast.makeText(this, "Прогресс и закладки успешно восстановлены!", Toast.LENGTH_LONG).show()
-            } catch (e: Exception) {
-                Toast.makeText(this, "Ошибка импорта: ${e.message}", Toast.LENGTH_LONG).show()
             }
+        }
+
+        binding.rowExportBackup.setOnClickListener {
+            exportBackupLauncher.launch("ABPlayer_backup.json")
+        }
+
+        binding.rowImportBackup.setOnClickListener {
+            importBackupLauncher.launch(arrayOf("application/json", "text/json", "*/*"))
         }
     }
 }

@@ -1,6 +1,5 @@
 package com.abplayer.app
 
-import android.Manifest
 import android.app.AlertDialog
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,7 +7,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
-import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.hardware.Sensor
@@ -18,6 +16,7 @@ import android.hardware.SensorManager
 import android.media.MediaMetadataRetriever
 import android.media.audiofx.Equalizer
 import android.media.audiofx.LoudnessEnhancer
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.CountDownTimer
@@ -28,13 +27,11 @@ import android.text.InputType
 import android.view.View
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.documentfile.provider.DocumentFile
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import com.abplayer.app.databinding.ActivityMainBinding
 import com.google.android.exoplayer2.C
 import com.google.android.exoplayer2.PlaybackParameters
-import java.io.File
 import java.nio.charset.Charset
 import java.util.Locale
 import kotlin.math.sqrt
@@ -66,14 +63,20 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private val buttonKeys = arrayOf("show_sleep", "show_audio", "show_chapters", "show_speed", "show_characters", "show_history", "show_lock")
     private val id3Labels = arrayOf("ID3: Файл", "ID3: UTF-8", "ID3: Win-1251")
 
-    data class ChapterItem(val file: File, val durationMs: Long, val rawTitle: String?)
-    data class BookItem(val folder: File, val title: String, val chapters: List<ChapterItem>, val totalDurationMs: Long, val coverFile: File?)
+    data class ChapterItem(val uri: Uri, val name: String, val durationMs: Long, val rawTitle: String?)
+    data class BookItem(val folderUri: Uri, val stateKey: String, val title: String, val chapters: List<ChapterItem>, val totalDurationMs: Long, val coverUri: Uri?)
 
     private val libraryLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == RESULT_OK) {
-            val path = result.data?.getStringExtra("selected_book_path")
-            if (path != null) {
-                loadSingleBook(File(path), autoPlay = true)
+            val uri = result.data?.getStringExtra("selected_book_uri")
+            if (uri != null) {
+                val bookUri = Uri.parse(uri)
+                loadSingleBook(
+                    bookUri,
+                    result.data?.getStringExtra("selected_book_key") ?: uri,
+                    result.data?.getStringExtra("selected_book_title"),
+                    autoPlay = true
+                )
             }
         }
     }
@@ -90,7 +93,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     playChapter(currentChapterIndex + 1, 0L, true)
                 } else if (book != null) {
                     getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-                        .edit().putString("status_${book.folder.absolutePath}", "finished").apply()
+                        .edit().putString("status_${book.stateKey}", "finished").apply()
                     binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
                 }
             }
@@ -124,7 +127,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         setupListeners()
-        checkStoragePermission()
     }
 
     override fun onResume() {
@@ -150,19 +152,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             val channel = NotificationChannel("abplayer_channel", "Воспроизведение книг", NotificationManager.IMPORTANCE_LOW)
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
-        }
-    }
-
-    private fun checkStoragePermission() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), 101)
-        }
-    }
-
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 101 && grantResults.isNotEmpty() && grantResults.get(0) == PackageManager.PERMISSION_GRANTED) {
-            syncWithRunningServiceOrLoadSaved()
         }
     }
 
@@ -247,19 +236,28 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
     private fun syncWithRunningServiceOrLoadSaved() {
         val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-        val lastBookPath = prefs.getString("last_book_path", null) ?: return
-        val folder = File(lastBookPath)
-        if (!folder.exists() || !folder.isDirectory) return
+        val lastBookUri = prefs.getString("last_book_uri", null)?.let(Uri::parse) ?: return
+        val folder = findBookFolder(lastBookUri) ?: return
 
         val isAlreadyPlaying = playerService?.exoPlayer?.isPlaying == true
-        loadSingleBook(folder, autoPlay = false, keepRunningService = isAlreadyPlaying)
+        val stateKey = prefs.getString("last_book_state_key", lastBookUri.toString()) ?: lastBookUri.toString()
+        loadSingleBook(lastBookUri, stateKey, folder.name, autoPlay = false, keepRunningService = isAlreadyPlaying)
     }
 
-    private fun loadSingleBook(folder: File, autoPlay: Boolean, keepRunningService: Boolean = false) {
+    private fun findBookFolder(bookUri: Uri): DocumentFile? {
         val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
+        val treeUri = prefs.getString("root_tree_uri", null)?.let(Uri::parse) ?: return null
+        val root = DocumentFile.fromTreeUri(this, treeUri) ?: return null
+        if (root.uri == bookUri) return root
+        return root.listFiles().firstOrNull { it.isDirectory && it.uri == bookUri }
+    }
+
+    private fun loadSingleBook(folderUri: Uri, stateKey: String, bookTitle: String?, autoPlay: Boolean, keepRunningService: Boolean = false) {
+        val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
+        val folder = findBookFolder(folderUri) ?: return
         val audioFiles = folder.listFiles()
-            ?.filter { it.isFile && audioExtensions.contains(it.extension.lowercase()) }
-            ?.sortedWith(compareBy({ it.name.length }, { it.name.lowercase() })) ?: return
+            .filter { it.isFile && audioExtensions.contains(it.name.orEmpty().substringAfterLast('.', "").lowercase()) }
+            .sortedWith(compareBy({ it.name.orEmpty().length }, { it.name.orEmpty().lowercase() }))
 
         if (audioFiles.isEmpty()) return
 
@@ -268,32 +266,37 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             var dur = 0L
             var titleTag: String? = null
             try {
-                retriever.setDataSource(file.absolutePath)
+                retriever.setDataSource(this, file.uri)
                 dur = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
                 titleTag = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
             } catch (_: Exception) {}
-            ChapterItem(file, dur, titleTag)
+            ChapterItem(file.uri, file.name ?: "Глава", dur, titleTag)
         }
         try { retriever.release() } catch (_: Exception) {}
 
         val totalDur = chapters.sumOf { it.durationMs }
         val cover = folder.listFiles()?.firstOrNull {
-            it.isFile && (it.extension.lowercase() == "jpg" || it.extension.lowercase() == "png")
+            it.isFile && it.name.orEmpty().substringAfterLast('.', "").lowercase() in setOf("jpg", "png")
         }
 
-        val book = BookItem(folder, folder.name, chapters, totalDur, cover)
+        val book = BookItem(folderUri, stateKey, bookTitle ?: folder.name ?: "Книга", chapters, totalDur, cover?.uri)
         currentBook = book
-        prefs.edit().putString("last_book_path", folder.absolutePath).apply()
+        prefs.edit()
+            .putString("last_book_uri", folderUri.toString())
+            .putString("last_book_state_key", stateKey)
+            .apply()
 
         binding.tvBookTitle.text = book.title
-        if (cover != null) {
-            binding.ivCover.setImageBitmap(BitmapFactory.decodeFile(cover.absolutePath))
+        if (book.coverUri != null) {
+            binding.ivCover.setImageBitmap(try {
+                contentResolver.openInputStream(book.coverUri)?.use { BitmapFactory.decodeStream(it) }
+            } catch (_: Exception) { null })
         } else {
             binding.ivCover.setImageDrawable(null)
         }
 
-        val savedChapter = prefs.getInt("chap_${folder.absolutePath}", 0).coerceIn(0, chapters.size - 1)
-        val savedPos = prefs.getLong("pos_ms_${folder.absolutePath}", 0L)
+        val savedChapter = prefs.getInt("chap_$stateKey", 0).coerceIn(0, chapters.size - 1)
+        val savedPos = prefs.getLong("pos_ms_$stateKey", 0L)
         currentChapterIndex = savedChapter
 
         if (keepRunningService) {
@@ -307,13 +310,13 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private fun formatChapterDisplayTitle(index: Int, chapter: ChapterItem): String {
         val raw = chapter.rawTitle?.trim()
         val title = when (id3Mode) {
-            1 -> if (!raw.isNullOrEmpty()) raw else chapter.file.nameWithoutExtension
+            1 -> if (!raw.isNullOrEmpty()) raw else chapter.name.substringBeforeLast('.', chapter.name)
             2 -> if (!raw.isNullOrEmpty()) {
                 try {
                     String(raw.toByteArray(Charsets.ISO_8859_1), Charset.forName("windows-1251"))
                 } catch (_: Exception) { raw }
-            } else chapter.file.nameWithoutExtension
-            else -> chapter.file.nameWithoutExtension
+            } else chapter.name.substringBeforeLast('.', chapter.name)
+            else -> chapter.name.substringBeforeLast('.', chapter.name)
         }
         val total = currentBook?.chapters?.size ?: 1
         return "${index + 1}/$total: $title"
@@ -344,10 +347,10 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         binding.tvChapterDuration.text = formatTime(chapter.durationMs)
 
         playerService?.playFile(
-            file = chapter.file,
+            uri = chapter.uri,
             bookTitle = book.title,
             chapterTitle = chapTitle,
-            coverPath = book.coverFile?.absolutePath,
+            coverUri = book.coverUri,
             startPosMs = startPosMs,
             speed = playbackSpeed,
             autoPlay = autoPlay
@@ -355,7 +358,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
         if (autoPlay) {
             getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-                .edit().putString("status_${book.folder.absolutePath}", "started").apply()
+                .edit().putString("status_${book.stateKey}", "started").apply()
             binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
             handler.post(updateRunnable)
         } else {
@@ -378,7 +381,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 player.seekTo(player.currentPosition - autoRewind * 1000L)
             }
             getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-                .edit().putString("status_${book.folder.absolutePath}", "started").apply()
+                .edit().putString("status_${book.stateKey}", "started").apply()
             player.play()
             binding.btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
             handler.post(updateRunnable)
@@ -446,8 +449,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         val book = currentBook ?: return
         val pos = playerService?.exoPlayer?.currentPosition ?: return
         getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE).edit()
-            .putInt("chap_${book.folder.absolutePath}", currentChapterIndex)
-            .putLong("pos_ms_${book.folder.absolutePath}", pos)
+            .putInt("chap_${book.stateKey}", currentChapterIndex)
+            .putLong("pos_ms_${book.stateKey}", pos)
             .apply()
     }
     private fun applyAudioEffects() {
@@ -612,7 +615,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private fun showBookmarksDialog() {
         val book = currentBook ?: return
         val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-        val key = "bookmarks_${book.folder.absolutePath}"
+        val key = "bookmarks_${book.stateKey}"
         val raw = prefs.getString(key, "") ?: ""
         val list = if (raw.isEmpty()) mutableListOf() else raw.split(";;").toMutableList()
 
@@ -646,7 +649,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private fun showCharactersDialog() {
         val book = currentBook ?: return
         val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-        val key = "chars_${book.folder.absolutePath}"
+        val key = "chars_${book.stateKey}"
         val input = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
             minLines = 5

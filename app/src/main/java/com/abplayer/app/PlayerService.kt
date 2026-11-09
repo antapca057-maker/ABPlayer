@@ -22,7 +22,6 @@ import com.google.android.exoplayer2.MediaItem
 import com.google.android.exoplayer2.PlaybackParameters
 import com.google.android.exoplayer2.Player
 import com.google.android.exoplayer2.audio.AudioAttributes
-import java.io.File
 
 class PlayerService : Service() {
 
@@ -41,7 +40,7 @@ class PlayerService : Service() {
 
     var currentBookTitle: String = "ABPlayer"
     var currentChapterTitle: String = ""
-    var currentCoverPath: String? = null
+    var currentCoverUri: Uri? = null
     var onChapterEndedCallback: (() -> Unit)? = null
     var onStateChangedCallback: (() -> Unit)? = null
 
@@ -170,13 +169,13 @@ class PlayerService : Service() {
         }
     }
 
-    fun playFile(file: File, bookTitle: String, chapterTitle: String, coverPath: String?, startPosMs: Long, speed: Float, autoPlay: Boolean) {
+    fun playFile(uri: Uri, bookTitle: String, chapterTitle: String, coverUri: Uri?, startPosMs: Long, speed: Float, autoPlay: Boolean) {
         currentBookTitle = bookTitle
         currentChapterTitle = chapterTitle
-        currentCoverPath = coverPath
+        currentCoverUri = coverUri
 
         val player = exoPlayer ?: return
-        player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
+        player.setMediaItem(MediaItem.fromUri(uri))
         player.prepare()
         if (startPosMs > 0L) player.seekTo(startPosMs)
         player.playbackParameters = PlaybackParameters(speed)
@@ -191,7 +190,11 @@ class PlayerService : Service() {
         val pos = player?.currentPosition ?: 0L
         val dur = player?.duration?.coerceAtLeast(0L) ?: 0L
 
-        val coverBitmap = currentCoverPath?.let { BitmapFactory.decodeFile(it) }
+        val coverBitmap = currentCoverUri?.let { uri ->
+            try {
+                contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+            } catch (_: Exception) { null }
+        }
 
         val metadataBuilder = MediaMetadataCompat.Builder()
             .putString(MediaMetadataCompat.METADATA_KEY_TITLE, currentChapterTitle)

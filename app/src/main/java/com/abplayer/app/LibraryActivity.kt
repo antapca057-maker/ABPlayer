@@ -1,11 +1,12 @@
 package com.abplayer.app
 
-import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
+import android.provider.DocumentsContract
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.media.MediaMetadataRetriever
+import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
 import android.text.Editable
@@ -17,11 +18,12 @@ import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.documentfile.provider.DocumentFile
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.abplayer.app.databinding.ActivityLibraryBinding
 import com.google.android.material.tabs.TabLayout
-import java.io.File
 import java.util.Locale
 
 class LibraryActivity : AppCompatActivity() {
@@ -36,15 +38,28 @@ class LibraryActivity : AppCompatActivity() {
     private var currentActivePath: String? = null
 
     private val audioExtensions = setOf("mp3", "m4b", "m4a", "ogg", "flac", "wav", "aac", "opus")
+    private val folderPickerLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
+        if (treeUri != null) {
+            try {
+                contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
+                    .edit().putString("root_tree_uri", treeUri.toString()).apply()
+                scanBooks()
+            } catch (_: SecurityException) {
+                Toast.makeText(this, "Не удалось сохранить доступ к папке", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     data class BookDisplayItem(
-        val folderPath: String,
+        val folderUri: String,
+        val stateKey: String,
         val title: String,
         val chaptersCount: Int,
         val totalDurationMs: Long,
         val readMs: Long,
         val status: String,
-        val coverPath: String?
+        val coverUri: String?
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -53,11 +68,13 @@ class LibraryActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-        currentActivePath = prefs.getString("last_book_path", null)
+        currentActivePath = prefs.getString("last_book_uri", null)
 
         adapter = BooksAdapter(displayedBooks) { book ->
             val resultIntent = Intent().apply {
-                putExtra("selected_book_path", book.folderPath)
+                putExtra("selected_book_uri", book.folderUri)
+                putExtra("selected_book_key", book.stateKey)
+                putExtra("selected_book_title", book.title)
             }
             setResult(RESULT_OK, resultIntent)
             finish()
@@ -68,9 +85,7 @@ class LibraryActivity : AppCompatActivity() {
 
         binding.btnBack.setOnClickListener { finish() }
         binding.btnRefresh.setOnClickListener { scanBooks() }
-        binding.btnPickFolder.setOnClickListener {
-            showFolderPickerDialog(Environment.getExternalStorageDirectory())
-        }
+        binding.btnPickFolder.setOnClickListener { folderPickerLauncher.launch(null) }
 
         binding.btnSearchToggle.setOnClickListener {
             if (binding.etSearch.visibility == View.VISIBLE) {
@@ -104,77 +119,75 @@ class LibraryActivity : AppCompatActivity() {
 
         scanBooks()
     }
-    private fun showFolderPickerDialog(currentDir: File) {
-        val dirs = currentDir.listFiles()?.filter { it.isDirectory && !it.name.startsWith(".") }?.sortedBy { it.name.lowercase() } ?: emptyList()
-        val items = mutableListOf("✅ ВЫБРАТЬ ЭТУ ПАПКУ (${currentDir.name})")
-        if (currentDir.parentFile != null && currentDir.parentFile!!.canRead()) {
-            items.add("⬆ .. (Назад)")
-        }
-        dirs.forEach { items.add("📁 ${it.name}") }
-
-        AlertDialog.Builder(this)
-            .setTitle(currentDir.absolutePath)
-            .setItems(items.toTypedArray()) { _, which ->
-                if (which == 0) {
-                    getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-                        .edit().putString("root_folder", currentDir.absolutePath).apply()
-                    scanBooks()
-                } else if (items.get(which).startsWith("⬆")) {
-                    currentDir.parentFile?.let { showFolderPickerDialog(it) }
-                } else {
-                    val dirName = items.get(which).removePrefix("📁 ")
-                    showFolderPickerDialog(File(currentDir, dirName))
-                }
-            }
-            .show()
-    }
-
     private fun scanBooks() {
         val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-        val rootPath = prefs.getString("root_folder", null)
-        if (rootPath == null) {
+        val treeUri = prefs.getString("root_tree_uri", null)?.let(Uri::parse)
+        if (treeUri == null) {
             Toast.makeText(this, "Выберите корневую папку с книгами", Toast.LENGTH_SHORT).show()
-            showFolderPickerDialog(Environment.getExternalStorageDirectory())
+            folderPickerLauncher.launch(null)
             return
         }
-        val rootDir = File(rootPath)
-        if (!rootDir.exists() || !rootDir.isDirectory) return
+        val rootDir = DocumentFile.fromTreeUri(this, treeUri)
+        if (rootDir == null || !rootDir.isDirectory || !rootDir.canRead()) {
+            Toast.makeText(this, "Нет доступа к папке. Выберите её заново", Toast.LENGTH_LONG).show()
+            folderPickerLauncher.launch(null)
+            return
+        }
+        val legacyRootPath = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
+            .getString("root_folder", null)
+            ?.takeIf { oldPath -> oldPath.trimEnd('/') == pathForTreeUri(treeUri)?.trimEnd('/') }
 
         allBooks.clear()
-        val foldersToScan = mutableListOf<File>()
+        val foldersToScan = mutableListOf<DocumentFile>()
         foldersToScan.add(rootDir)
-        rootDir.listFiles()?.filter { it.isDirectory }?.forEach { foldersToScan.add(it) }
+        rootDir.listFiles().filter { it.isDirectory && !it.name.orEmpty().startsWith(".") }.forEach { foldersToScan.add(it) }
 
         val retriever = MediaMetadataRetriever()
         for (folder in foldersToScan) {
             val audioFiles = folder.listFiles()
-                ?.filter { it.isFile && audioExtensions.contains(it.extension.lowercase()) }
-                ?.sortedWith(compareBy({ it.name.length }, { it.name.lowercase() })) ?: continue
+                .filter { it.isFile && audioExtensions.contains(it.name.orEmpty().substringAfterLast('.', "").lowercase()) }
+                .sortedWith(compareBy({ it.name.orEmpty().length }, { it.name.orEmpty().lowercase() }))
 
             if (audioFiles.isNotEmpty()) {
                 val durations = audioFiles.map { file ->
                     try {
-                        retriever.setDataSource(file.absolutePath)
+                        retriever.setDataSource(this, file.uri)
                         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
                     } catch (_: Exception) { 0L }
                 }
                 val totalDur = durations.sum()
-                val savedChap = prefs.getInt("chap_${folder.absolutePath}", 0).coerceIn(0, audioFiles.size - 1)
-                val savedPos = prefs.getLong("pos_ms_${folder.absolutePath}", 0L)
+                val uriKey = folder.uri.toString()
+                val stateKey = if (legacyRootPath == null) uriKey else if (folder.uri == treeUri) {
+                    legacyRootPath
+                } else {
+                    "$legacyRootPath/${folder.name}"
+                }
+                val savedChap = prefs.getInt("chap_$uriKey", prefs.getInt("chap_$stateKey", 0))
+                    .coerceIn(0, audioFiles.size - 1)
+                val savedPos = prefs.getLong("pos_ms_$uriKey", prefs.getLong("pos_ms_$stateKey", 0L))
                 var readMs = 0L
                 for (i in 0 until savedChap) readMs += durations.get(i)
                 readMs += savedPos
 
-                val status = prefs.getString("status_${folder.absolutePath}", "new") ?: "new"
-                val cover = folder.listFiles()?.firstOrNull {
-                    it.isFile && (it.extension.lowercase() == "jpg" || it.extension.lowercase() == "png")
-                }?.absolutePath
+                val status = prefs.getString("status_$uriKey", prefs.getString("status_$stateKey", "new")) ?: "new"
+                val cover = folder.listFiles().firstOrNull {
+                    it.isFile && it.name.orEmpty().substringAfterLast('.', "").lowercase() in setOf("jpg", "png")
+                }
 
-                allBooks.add(BookDisplayItem(folder.absolutePath, folder.name, audioFiles.size, totalDur, readMs, status, cover))
+                allBooks.add(BookDisplayItem(uriKey, stateKey, folder.name ?: "Книга", audioFiles.size, totalDur, readMs, status, cover?.uri?.toString()))
             }
         }
         try { retriever.release() } catch (_: Exception) {}
         filterBooks()
+    }
+
+    private fun pathForTreeUri(treeUri: Uri): String? {
+        if (treeUri.authority != "com.android.externalstorage.documents") return null
+        val documentId = DocumentsContract.getTreeDocumentId(treeUri)
+        val volume = documentId.substringBefore(':')
+        val relativePath = documentId.substringAfter(':', "").trim('/')
+        val volumeRoot = if (volume == "primary") Environment.getExternalStorageDirectory().absolutePath else "/storage/$volume"
+        return if (relativePath.isEmpty()) volumeRoot else "$volumeRoot/$relativePath"
     }
 
     private fun filterBooks() {
@@ -221,15 +234,17 @@ class LibraryActivity : AppCompatActivity() {
         override fun onBindViewHolder(holder: BookViewHolder, position: Int) {
             val item = items.get(position)
             holder.tvTitle.text = item.title
-            holder.tvTitle.setTextColor(if (item.folderPath == currentActivePath) Color.parseColor("#4DA6FF") else Color.WHITE)
+            holder.tvTitle.setTextColor(if (item.folderUri == currentActivePath) Color.parseColor("#4DA6FF") else Color.WHITE)
             holder.tvChapters.text = "${item.chaptersCount} гл."
 
             val totalSafe = item.totalDurationMs.coerceAtLeast(1L)
             val pct = ((item.readMs * 100) / totalSafe).toInt().coerceIn(0, 100)
             holder.tvProgress.text = "${formatShortTime(item.readMs)} / ${formatShortTime(item.totalDurationMs)}   $pct%"
 
-            if (item.coverPath != null) {
-                holder.ivCover.setImageBitmap(BitmapFactory.decodeFile(item.coverPath))
+            if (item.coverUri != null) {
+                holder.ivCover.setImageBitmap(try {
+                    contentResolver.openInputStream(Uri.parse(item.coverUri))?.use { BitmapFactory.decodeStream(it) }
+                } catch (_: Exception) { null })
             } else {
                 holder.ivCover.setImageResource(android.R.drawable.ic_menu_gallery)
             }
