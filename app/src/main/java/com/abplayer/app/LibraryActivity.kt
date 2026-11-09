@@ -105,10 +105,7 @@ class LibraryActivity : AppCompatActivity() {
         scanBooks()
     }
     private fun showFolderPickerDialog(currentDir: File) {
-        val rawFiles = currentDir.listFiles()
-        val dirs = rawFiles?.filter { it.isDirectory && !it.name.startsWith(".") }
-            ?.sortedWith(compareBy { it.name.lowercase(java.util.Locale.ROOT) }) ?: emptyList()
-            
+        val dirs = currentDir.listFiles()?.filter { it.isDirectory && !it.name.startsWith(".") }?.sortedBy { it.name.lowercase() } ?: emptyList()
         val items = mutableListOf("✅ ВЫБРАТЬ ЭТУ ПАПКУ (${currentDir.name})")
         if (currentDir.parentFile != null && currentDir.parentFile!!.canRead()) {
             items.add("⬆ .. (Назад)")
@@ -137,8 +134,7 @@ class LibraryActivity : AppCompatActivity() {
         val rootPath = prefs.getString("root_folder", null)
         if (rootPath == null) {
             Toast.makeText(this, "Выберите корневую папку с книгами", Toast.LENGTH_SHORT).show()
-            val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
-            showFolderPickerDialog(if (musicDir.exists()) musicDir else Environment.getExternalStorageDirectory())
+            showFolderPickerDialog(Environment.getExternalStorageDirectory())
             return
         }
         val rootDir = File(rootPath)
@@ -152,8 +148,8 @@ class LibraryActivity : AppCompatActivity() {
         val retriever = MediaMetadataRetriever()
         for (folder in foldersToScan) {
             val audioFiles = folder.listFiles()
-                ?.filter { it.isFile && audioExtensions.contains(it.extension.lowercase(java.util.Locale.ROOT)) }
-                ?.sortedWith(compareBy({ it.name.length }, { it.name.lowercase(java.util.Locale.ROOT) })) ?: continue
+                ?.filter { it.isFile && audioExtensions.contains(it.extension.lowercase()) }
+                ?.sortedWith(compareBy({ it.name.length }, { it.name.lowercase() })) ?: continue
 
             if (audioFiles.isNotEmpty()) {
                 val durations = audioFiles.map { file ->
@@ -171,7 +167,7 @@ class LibraryActivity : AppCompatActivity() {
 
                 val status = prefs.getString("status_${folder.absolutePath}", "new") ?: "new"
                 val cover = folder.listFiles()?.firstOrNull {
-                    it.isFile && (it.extension.lowercase(java.util.Locale.ROOT) == "jpg" || it.extension.lowercase(java.util.Locale.ROOT) == "png")
+                    it.isFile && (it.extension.lowercase() == "jpg" || it.extension.lowercase() == "png")
                 }?.absolutePath
 
                 allBooks.add(BookDisplayItem(folder.absolutePath, folder.name, audioFiles.size, totalDur, readMs, status, cover))
