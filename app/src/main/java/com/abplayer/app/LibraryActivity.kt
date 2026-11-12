@@ -2,29 +2,36 @@ package com.abplayer.app
 
 import android.content.Context
 import android.content.Intent
-import android.provider.DocumentsContract
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.text.Editable
 import android.text.TextWatcher
+import android.util.LruCache
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.isVisible
 import androidx.documentfile.provider.DocumentFile
+import androidx.lifecycle.Job
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.abplayer.app.databinding.ActivityLibraryBinding
 import com.google.android.material.tabs.TabLayout
-import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class LibraryActivity : AppCompatActivity() {
 
@@ -32,12 +39,17 @@ class LibraryActivity : AppCompatActivity() {
     private val allBooks = mutableListOf<BookDisplayItem>()
     private val displayedBooks = mutableListOf<BookDisplayItem>()
     private lateinit var adapter: BooksAdapter
+    private var scanJob: Job? = null
+
+    // Кэш обложек, чтобы не декодировать одно и то же при прокрутке
+    private val coverCache = LruCache<String, Bitmap>(12)
 
     private var selectedTab = 0
     private var searchQuery = ""
     private var currentActivePath: String? = null
 
     private val audioExtensions = setOf("mp3", "m4b", "m4a", "ogg", "flac", "wav", "aac", "opus")
+
     private val folderPickerLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
         if (treeUri != null) {
             try {
@@ -119,66 +131,140 @@ class LibraryActivity : AppCompatActivity() {
 
         scanBooks()
     }
+
+    override fun onDestroy() {
+        scanJob?.cancel()
+        super.onDestroy()
+    }
+
+    /** Точка входа: проверяет доступ, показывает прогресс, уводит тяжёлую работу в IO. */
     private fun scanBooks() {
         val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
         val treeUri = prefs.getString("root_tree_uri", null)?.let(Uri::parse)
+
         if (treeUri == null) {
             Toast.makeText(this, "Выберите корневую папку с книгами", Toast.LENGTH_SHORT).show()
-            folderPickerLauncher.launch(null)
+            binding.root.post { folderPickerLauncher.launch(null) }   // НЕ из стека onCreate
             return
         }
+
         val rootDir = DocumentFile.fromTreeUri(this, treeUri)
         if (rootDir == null || !rootDir.isDirectory || !rootDir.canRead()) {
             Toast.makeText(this, "Нет доступа к папке. Выберите её заново", Toast.LENGTH_LONG).show()
-            folderPickerLauncher.launch(null)
+            binding.root.post { folderPickerLauncher.launch(null) }
             return
         }
-        val legacyRootPath = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
-            .getString("root_folder", null)
+
+        scanJob?.cancel()
+        setScanning(true)
+
+        scanJob = lifecycleScope.launch {
+            try {
+                val books = withContext(Dispatchers.IO) { buildBooksList(rootDir, treeUri, prefs) }
+                allBooks.clear()
+                allBooks.addAll(books)
+                filterBooks()
+            } catch (e: Exception) {
+                Toast.makeText(this@LibraryActivity, "Ошибка сканирования: ${e.message}", Toast.LENGTH_LONG).show()
+            } finally {
+                setScanning(false)
+            }
+        }
+    }
+
+    private fun setScanning(active: Boolean) {
+        // ProgressBar с id progressBarScan должен быть добавлен в activity_library.xml
+        runCatching { binding.progressBarScan.isVisible = active }
+    }
+
+    /** Выполняется на Dispatchers.IO — никакого обращения к UI отсюда. */
+    private suspend fun buildBooksList(
+        rootDir: DocumentFile,
+        treeUri: Uri,
+        prefs: android.content.SharedPreferences
+    ): List<BookDisplayItem> {
+        ensureUiAlive()
+
+        val legacyRootPath = prefs.getString("root_folder", null)
             ?.takeIf { oldPath -> oldPath.trimEnd('/') == pathForTreeUri(treeUri)?.trimEnd('/') }
 
-        allBooks.clear()
+        val result = mutableListOf<BookDisplayItem>()
+
         val foldersToScan = mutableListOf<DocumentFile>()
         foldersToScan.add(rootDir)
-        rootDir.listFiles().filter { it.isDirectory && !it.name.orEmpty().startsWith(".") }.forEach { foldersToScan.add(it) }
+        rootDir.listFiles()
+            .filter { it.isDirectory && !it.name.orEmpty().startsWith(".") }
+            .forEach { foldersToScan.add(it) }
 
-        val retriever = MediaMetadataRetriever()
         for (folder in foldersToScan) {
-            val audioFiles = folder.listFiles()
+            ensureUiAlive()
+
+            val children = folder.listFiles()
+            val audioFiles = children
                 .filter { it.isFile && audioExtensions.contains(it.name.orEmpty().substringAfterLast('.', "").lowercase()) }
                 .sortedWith(compareBy({ it.name.orEmpty().length }, { it.name.orEmpty().lowercase() }))
 
-            if (audioFiles.isNotEmpty()) {
-                val durations = audioFiles.map { file ->
-                    try {
+            if (audioFiles.isEmpty()) continue
+
+            // Один retriever на папку, обязательно освобождаем в finally
+            val durations = ArrayList<Long>(audioFiles.size)
+            val retriever = MediaMetadataRetriever()
+            try {
+                for (file in audioFiles) {
+                    ensureUiAlive()
+                    durations += try {
                         retriever.setDataSource(this, file.uri)
                         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                    } catch (_: Exception) { 0L }
+                    } catch (_: Exception) {
+                        0L
+                    }
                 }
-                val totalDur = durations.sum()
-                val uriKey = folder.uri.toString()
-                val stateKey = if (legacyRootPath == null) uriKey else if (folder.uri == treeUri) {
-                    legacyRootPath
-                } else {
-                    "$legacyRootPath/${folder.name}"
-                }
-                val savedChap = prefs.getInt("chap_$uriKey", prefs.getInt("chap_$stateKey", 0))
-                    .coerceIn(0, audioFiles.size - 1)
-                val savedPos = prefs.getLong("pos_ms_$uriKey", prefs.getLong("pos_ms_$stateKey", 0L))
-                var readMs = 0L
-                for (i in 0 until savedChap) readMs += durations.get(i)
-                readMs += savedPos
-
-                val status = prefs.getString("status_$uriKey", prefs.getString("status_$stateKey", "new")) ?: "new"
-                val cover = folder.listFiles().firstOrNull {
-                    it.isFile && it.name.orEmpty().substringAfterLast('.', "").lowercase() in setOf("jpg", "png")
-                }
-
-                allBooks.add(BookDisplayItem(uriKey, stateKey, folder.name ?: "Книга", audioFiles.size, totalDur, readMs, status, cover?.uri?.toString()))
+            } finally {
+                try { retriever.release() } catch (_: Exception) {}
             }
+
+            val totalDur = durations.sum()
+            val uriKey = folder.uri.toString()
+            val stateKey = when {
+                legacyRootPath == null -> uriKey
+                folder.uri == treeUri -> legacyRootPath
+                else -> "$legacyRootPath/${folder.name}"
+            }
+
+            // Безопасное ограничение: coerceAtLeast/coerceAtMost не падают при size == 0
+            val savedChap = prefs.getInt("chap_$uriKey", prefs.getInt("chap_$stateKey", 0))
+                .coerceAtLeast(0)
+                .coerceAtMost(audioFiles.size - 1)
+
+            val savedPos = prefs.getLong("pos_ms_$uriKey", prefs.getLong("pos_ms_$stateKey", 0L))
+            var readMs = 0L
+            for (i in 0 until savedChap) readMs += durations[i]
+            readMs += savedPos.coerceAtLeast(0L)
+
+            val status = prefs.getString("status_$uriKey", prefs.getString("status_$stateKey", "new")) ?: "new"
+
+            val cover = children.firstOrNull {
+                it.isFile && it.name.orEmpty().substringBeforeLast('.').lowercase().let { base ->
+                    base == "cover" || base == "folder"
+                } && it.name.orEmpty().substringAfterLast('.', "").lowercase() in setOf("jpg", "jpeg", "png")
+            } ?: children.firstOrNull {
+                it.isFile && it.name.orEmpty().substringAfterLast('.', "").lowercase() in setOf("jpg", "jpeg", "png")
+            }
+
+            result.add(
+                BookDisplayItem(
+                    uriKey, stateKey, folder.name ?: "Книга",
+                    audioFiles.size, totalDur, readMs, status, cover?.uri?.toString()
+                )
+            )
         }
-        try { retriever.release() } catch (_: Exception) {}
-        filterBooks()
+        return result
+    }
+
+    /** Прерывает фоновое сканирование, если Activity уже уничтожена. */
+    private suspend fun ensureUiAlive() {
+        if (isFinishing || isDestroyed) throw kotlinx.coroutines.CancellationException("activity destroyed")
+        kotlinx.coroutines.yield()
     }
 
     private fun pathForTreeUri(treeUri: Uri): String? {
@@ -200,9 +286,7 @@ class LibraryActivity : AppCompatActivity() {
                 else -> true
             }
             val matchesQuery = searchQuery.isEmpty() || book.title.lowercase().contains(searchQuery)
-            if (matchesTab && matchesQuery) {
-                displayedBooks.add(book)
-            }
+            if (matchesTab && matchesQuery) displayedBooks.add(book)
         }
         adapter.notifyDataSetChanged()
     }
@@ -214,7 +298,7 @@ class LibraryActivity : AppCompatActivity() {
         return if (h > 0) "${h}ч ${m}м" else "${m}м"
     }
 
-    inner class BooksAdapter(
+    private inner class BooksAdapter(
         private val items: List<BookDisplayItem>,
         private val onClick: (BookDisplayItem) -> Unit
     ) : RecyclerView.Adapter<BooksAdapter.BookViewHolder>() {
@@ -232,7 +316,7 @@ class LibraryActivity : AppCompatActivity() {
         }
 
         override fun onBindViewHolder(holder: BookViewHolder, position: Int) {
-            val item = items.get(position)
+            val item = items[position]
             holder.tvTitle.text = item.title
             holder.tvTitle.setTextColor(if (item.folderUri == currentActivePath) Color.parseColor("#4DA6FF") else Color.WHITE)
             holder.tvChapters.text = "${item.chaptersCount} гл."
@@ -241,17 +325,41 @@ class LibraryActivity : AppCompatActivity() {
             val pct = ((item.readMs * 100) / totalSafe).toInt().coerceIn(0, 100)
             holder.tvProgress.text = "${formatShortTime(item.readMs)} / ${formatShortTime(item.totalDurationMs)}   $pct%"
 
-            if (item.coverUri != null) {
-                holder.ivCover.setImageBitmap(try {
-                    contentResolver.openInputStream(Uri.parse(item.coverUri))?.use { BitmapFactory.decodeStream(it) }
-                } catch (_: Exception) { null })
-            } else {
-                holder.ivCover.setImageResource(android.R.drawable.ic_menu_gallery)
-            }
-
+            loadCover(holder, item.coverUri)
             holder.itemView.setOnClickListener { onClick(item) }
         }
 
         override fun getItemCount(): Int = items.size
+
+        /** Декодирование обложки вне главного потока + защита от подмены позиции. */
+        private fun loadCover(holder: BookViewHolder, coverUri: String?) {
+            val tag = coverUri ?: ""
+            holder.ivCover.tag = tag
+            holder.ivCover.setImageResource(android.R.drawable.ic_menu_gallery)
+
+            if (coverUri == null) return
+
+            coverCache.get(coverUri)?.let { cached ->
+                if (holder.ivCover.tag == tag) holder.ivCover.setImageBitmap(cached)
+                return
+            }
+
+            lifecycleScope.launch {
+                val bmp = withContext(Dispatchers.IO) {
+                    try {
+                        contentResolver.openInputStream(Uri.parse(coverUri))?.use { input ->
+                            val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+                            BitmapFactory.decodeStream(input, null, opts)
+                        }
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                if (bmp != null) coverCache.put(coverUri, bmp)
+                if (isActive && holder.ivCover.tag == tag && bmp != null) {
+                    holder.ivCover.setImageBitmap(bmp)
+                }
+            }
+        }
     }
 }

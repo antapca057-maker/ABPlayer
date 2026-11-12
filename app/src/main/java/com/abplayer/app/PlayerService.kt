@@ -1,33 +1,40 @@
 package com.abplayer.app
 
-import android.os.SystemClock
-import android.view.KeyEvent
+import android.app.AlarmManager
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.graphics.BitmapFactory
+import android.media.AudioAttributes
 import android.media.audiofx.Equalizer
 import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.os.Binder
+import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
-import androidx.media.app.NotificationCompat.MediaStyle
+import androidx.core.app.NotificationCompat.MediaStyle
+import androidx.core.alarm.AlarmManagerCompat
 import com.google.android.exoplayer2.C
 import com.google.android.exoplayer2.ExoPlayer
 import com.google.android.exoplayer2.MediaItem
 import com.google.android.exoplayer2.PlaybackParameters
 import com.google.android.exoplayer2.Player
-import com.google.android.exoplayer2.audio.AudioAttributes
+import com.google.android.exoplayer2.audio.AudioAttributes as ExoAudioAttributes
+
 
 class PlayerService : Service() {
+
 
     inner class LocalBinder : Binder() {
         fun getService(): PlayerService = this@PlayerService
     }
+
 
     private val binder = LocalBinder()
     var exoPlayer: ExoPlayer? = null
@@ -37,6 +44,10 @@ class PlayerService : Service() {
     private var headsetClickCount = 0
     private var lastHeadsetClickTime = 0L
 
+    private val notificationManager: NotificationManager by lazy {
+        getSystemService(NotificationManager::class.java)
+    }
+
 
     var currentBookTitle: String = "ABPlayer"
     var currentChapterTitle: String = ""
@@ -44,15 +55,29 @@ class PlayerService : Service() {
     var onChapterEndedCallback: (() -> Unit)? = null
     var onStateChangedCallback: (() -> Unit)? = null
 
+
     companion object {
+        private const val CHANNEL_ID = "abplayer_channel"
+        private const val NOTIF_ID = 101
         const val ACTION_PLAY_PAUSE = "com.abplayer.ACTION_PLAY_PAUSE"
         const val ACTION_REW = "com.abplayer.ACTION_REW"
         const val ACTION_FWD = "com.abplayer.ACTION_FWD"
         const val ACTION_STOP = "com.abplayer.ACTION_STOP"
     }
 
+
     override fun onCreate() {
         super.onCreate()
+
+        // Создание notification-канала с аудиатрибутами
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+        val channel = NotificationChannel(CHANNEL_ID, "Воспроизведение", NotificationManager.IMPORTANCE_LOW)
+            .apply { setShowBadge(false); setAudioAttributes(audioAttributes) }
+        notificationManager.createNotificationChannel(channel)
+
 
         mediaSession = MediaSessionCompat(this, "ABPlayerSession").apply {
             setCallback(object : MediaSessionCompat.Callback() {
@@ -86,7 +111,6 @@ class PlayerService : Service() {
                         when (headsetClickCount) {
                             1 -> exoPlayer?.let { if (it.isPlaying) it.pause() else it.play() }
                             2 -> {
-                                // Отменяем паузу от первого клика и мотаем вперед
                                 exoPlayer?.play()
                                 seekBy(10000L)
                             }
@@ -104,13 +128,14 @@ class PlayerService : Service() {
             isActive = true
         }
 
-        val audioAttributes = AudioAttributes.Builder()
+
+        val exoAudioAttributes = ExoAudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
             .build()
 
         exoPlayer = ExoPlayer.Builder(this)
-            .setAudioAttributes(audioAttributes, true)
+            .setAudioAttributes(exoAudioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .build().apply {
                 setWakeMode(C.WAKE_MODE_LOCAL)
@@ -131,6 +156,7 @@ class PlayerService : Service() {
             }
     }
 
+
     private fun seekBy(deltaMs: Long) {
         exoPlayer?.let {
             val dur = it.duration.coerceAtLeast(0L)
@@ -141,6 +167,7 @@ class PlayerService : Service() {
             }
         }
     }
+
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -159,15 +186,35 @@ class PlayerService : Service() {
         return START_STICKY
     }
 
+
     override fun onBind(intent: Intent?): IBinder = binder
 
+
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // Если книга играет — не закрываем службу при смахивании экрана
-        if (exoPlayer?.isPlaying != true) {
+        super.onTaskRemoved(rootIntent)
+        if (exoPlayer?.isPlaying == true) {
+            val restartIntent = Intent(this, javaClass)
+            restartIntent.action = PlayerService.ACTION_PLAY_PAUSE
+            val restartFlags = if (Build.VERSION.SDK_INT >= 31) {
+                PendingIntent.FLAG_IMMUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            val restartPendingIntent = PendingIntent.getService(
+                this, 0, restartIntent, restartFlags
+            )
+            AlarmManagerCompat.setExactAndAllowWhileIdle(
+                getSystemService(AlarmManager::class.java),
+                AlarmManager.ELAPSED_REALTIME,
+                SystemClock.elapsedRealtime() + 1000,
+                restartPendingIntent
+            )
+        } else {
             stopForeground(true)
             stopSelf()
         }
     }
+
 
     fun playFile(uri: Uri, bookTitle: String, chapterTitle: String, coverUri: Uri?, startPosMs: Long, speed: Float, autoPlay: Boolean) {
         currentBookTitle = bookTitle
@@ -181,8 +228,25 @@ class PlayerService : Service() {
         player.playbackParameters = PlaybackParameters(speed)
 
         if (autoPlay) player.play() else player.pause()
+
+        // Инициализация эквалайзера и усиления тихой речи
+        if (equalizer == null) {
+            val sessionId = player.audioSessionId
+            if (sessionId != C.AUDIO_SESSION_ID_UNSET) {
+                equalizer = Equalizer(0, sessionId).also { it.setEnabled(true) }
+            }
+        }
+        if (loudnessEnhancer == null) {
+            val sessionId = player.audioSessionId
+            if (sessionId != C.AUDIO_SESSION_ID_UNSET) {
+                loudnessEnhancer = LoudnessEnhancer(sessionId).apply { setTargetGain(2000) }
+                loudnessEnhancer?.enabled = true
+            }
+        }
+
         updateMediaSessionAndNotification()
     }
+
 
     fun updateMediaSessionAndNotification() {
         val player = exoPlayer
@@ -220,16 +284,21 @@ class PlayerService : Service() {
             )
         mediaSession.setPlaybackState(stateBuilder.build())
 
-        val openIntent = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
+        val pendingFlags = if (Build.VERSION.SDK_INT >= 31) {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        val rewIntent = PendingIntent.getService(this, 1, Intent(this, PlayerService::class.java).setAction(ACTION_REW), PendingIntent.FLAG_IMMUTABLE)
-        val playPauseIntent = PendingIntent.getService(this, 2, Intent(this, PlayerService::class.java).setAction(ACTION_PLAY_PAUSE), PendingIntent.FLAG_IMMUTABLE)
-        val fwdIntent = PendingIntent.getService(this, 3, Intent(this, PlayerService::class.java).setAction(ACTION_FWD), PendingIntent.FLAG_IMMUTABLE)
-        val stopIntent = PendingIntent.getService(this, 4, Intent(this, PlayerService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE)
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
 
-        val builder = NotificationCompat.Builder(this, "abplayer_channel")
+        val openIntent = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java), pendingFlags
+        )
+        val rewIntent = PendingIntent.getService(this, 1, Intent(this, PlayerService::class.java).setAction(ACTION_REW), pendingFlags)
+        val playPauseIntent = PendingIntent.getService(this, 2, Intent(this, PlayerService::class.java).setAction(ACTION_PLAY_PAUSE), pendingFlags)
+        val fwdIntent = PendingIntent.getService(this, 3, Intent(this, PlayerService::class.java).setAction(ACTION_FWD), pendingFlags)
+        val stopIntent = PendingIntent.getService(this, 4, Intent(this, PlayerService::class.java).setAction(ACTION_STOP), pendingFlags)
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(if (isPlaying) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause)
             .setContentTitle(currentBookTitle)
             .setContentText(currentChapterTitle)
@@ -253,8 +322,15 @@ class PlayerService : Service() {
             builder.setLargeIcon(coverBitmap)
         }
 
-        startForeground(1, builder.build())
+        // Фикс для Android 12+: startForeground с type для mediaPlayback
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(NOTIF_ID, builder.build(),
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        } else {
+            startForeground(NOTIF_ID, builder.build())
+        }
     }
+
 
     override fun onDestroy() {
         super.onDestroy()

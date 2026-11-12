@@ -57,6 +57,17 @@
             app:tint="#FFFFFF" />
     </LinearLayout>
 
+    <!-- Индикатор сканирования библиотеки -->
+    <ProgressBar
+        android:id="@+id/progressBarScan"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:indeterminate="true"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="-6dp"
+        android:progressTint="#4DA6FF"
+        android:visibility="gone" />
+
     <EditText
         android:id="@+id/etSearch"
         android:layout_width="match_parent"

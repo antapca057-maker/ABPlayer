@@ -11,8 +11,8 @@ android {
         applicationId "com.abplayer.app"
         minSdk 23
         targetSdk 34
-        versionCode 2
-        versionName "1.1"
+        versionCode 3
+        versionName "1.2"
     }
 
     applicationVariants.all { variant ->
@@ -48,4 +48,9 @@ dependencies {
     implementation 'androidx.documentfile:documentfile:1.0.1'
     implementation 'com.google.android.exoplayer:exoplayer:2.18.7'
     implementation 'androidx.media:media:1.6.0'
+
+    // Корутины — для фонового сканирования библиотеки в LibraryActivity
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+    // lifecycleScope / Job — привязка корутин к жизненному циклу Activity
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
 }
