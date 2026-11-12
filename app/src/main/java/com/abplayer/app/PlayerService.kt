@@ -1,10 +1,10 @@
 package com.abplayer.app
 
+
 import android.app.AlarmManager
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.Intent
 import android.graphics.BitmapFactory
 import android.media.AudioAttributes
 import android.media.audiofx.Equalizer
@@ -19,13 +19,13 @@ import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationCompat.MediaStyle
-import androidx.core.alarm.AlarmManagerCompat
 import com.google.android.exoplayer2.C
 import com.google.android.exoplayer2.ExoPlayer
 import com.google.android.exoplayer2.MediaItem
 import com.google.android.exoplayer2.PlaybackParameters
 import com.google.android.exoplayer2.Player
 import com.google.android.exoplayer2.audio.AudioAttributes as ExoAudioAttributes
+import android.view.KeyEvent
 
 
 class PlayerService : Service() {
@@ -69,12 +69,11 @@ class PlayerService : Service() {
     override fun onCreate() {
         super.onCreate()
 
-        // Создание notification-канала с аудиатрибутами
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .build()
-        val channel = NotificationChannel(CHANNEL_ID, "Воспроизведение", NotificationManager.IMPORTANCE_LOW)
+        val channel = android.app.NotificationChannel(CHANNEL_ID, "Воспроизведение", NotificationManager.IMPORTANCE_LOW)
             .apply { setShowBadge(false); setAudioAttributes(audioAttributes) }
         notificationManager.createNotificationChannel(channel)
 
@@ -203,8 +202,8 @@ class PlayerService : Service() {
             val restartPendingIntent = PendingIntent.getService(
                 this, 0, restartIntent, restartFlags
             )
-            AlarmManagerCompat.setExactAndAllowWhileIdle(
-                getSystemService(AlarmManager::class.java),
+            val alarmManager = getSystemService(AlarmManager::class.java)
+            alarmManager.setExactAndAllowWhileIdle(
                 AlarmManager.ELAPSED_REALTIME,
                 SystemClock.elapsedRealtime() + 1000,
                 restartPendingIntent
@@ -229,7 +228,6 @@ class PlayerService : Service() {
 
         if (autoPlay) player.play() else player.pause()
 
-        // Инициализация эквалайзера и усиления тихой речи
         if (equalizer == null) {
             val sessionId = player.audioSessionId
             if (sessionId != C.AUDIO_SESSION_ID_UNSET) {
@@ -322,7 +320,6 @@ class PlayerService : Service() {
             builder.setLargeIcon(coverBitmap)
         }
 
-        // Фикс для Android 12+: startForeground с type для mediaPlayback
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(NOTIF_ID, builder.build(),
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)

@@ -23,13 +23,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.documentfile.provider.DocumentFile
-import androidx.lifecycle.Job
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.abplayer.app.databinding.ActivityLibraryBinding
 import com.google.android.material.tabs.TabLayout
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -41,7 +42,6 @@ class LibraryActivity : AppCompatActivity() {
     private lateinit var adapter: BooksAdapter
     private var scanJob: Job? = null
 
-    // Кэш обложек, чтобы не декодировать одно и то же при прокрутке
     private val coverCache = LruCache<String, Bitmap>(12)
 
     private var selectedTab = 0
@@ -137,14 +137,13 @@ class LibraryActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    /** Точка входа: проверяет доступ, показывает прогресс, уводит тяжёлую работу в IO. */
     private fun scanBooks() {
         val prefs = getSharedPreferences("abplayer_prefs", Context.MODE_PRIVATE)
         val treeUri = prefs.getString("root_tree_uri", null)?.let(Uri::parse)
 
         if (treeUri == null) {
             Toast.makeText(this, "Выберите корневую папку с книгами", Toast.LENGTH_SHORT).show()
-            binding.root.post { folderPickerLauncher.launch(null) }   // НЕ из стека onCreate
+            binding.root.post { folderPickerLauncher.launch(null) }
             return
         }
 
@@ -173,17 +172,15 @@ class LibraryActivity : AppCompatActivity() {
     }
 
     private fun setScanning(active: Boolean) {
-        // ProgressBar с id progressBarScan должен быть добавлен в activity_library.xml
         runCatching { binding.progressBarScan.isVisible = active }
     }
 
-    /** Выполняется на Dispatchers.IO — никакого обращения к UI отсюда. */
     private suspend fun buildBooksList(
         rootDir: DocumentFile,
         treeUri: Uri,
         prefs: android.content.SharedPreferences
     ): List<BookDisplayItem> {
-        ensureUiAlive()
+        if (isFinishing || isDestroyed) throw kotlinx.coroutines.CancellationException("activity destroyed")
 
         val legacyRootPath = prefs.getString("root_folder", null)
             ?.takeIf { oldPath -> oldPath.trimEnd('/') == pathForTreeUri(treeUri)?.trimEnd('/') }
@@ -197,7 +194,7 @@ class LibraryActivity : AppCompatActivity() {
             .forEach { foldersToScan.add(it) }
 
         for (folder in foldersToScan) {
-            ensureUiAlive()
+            if (isFinishing || isDestroyed) throw kotlinx.coroutines.CancellationException("activity destroyed")
 
             val children = folder.listFiles()
             val audioFiles = children
@@ -206,12 +203,11 @@ class LibraryActivity : AppCompatActivity() {
 
             if (audioFiles.isEmpty()) continue
 
-            // Один retriever на папку, обязательно освобождаем в finally
             val durations = ArrayList<Long>(audioFiles.size)
             val retriever = MediaMetadataRetriever()
             try {
                 for (file in audioFiles) {
-                    ensureUiAlive()
+                    if (isFinishing || isDestroyed) throw kotlinx.coroutines.CancellationException("activity destroyed")
                     durations += try {
                         retriever.setDataSource(this, file.uri)
                         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
@@ -231,7 +227,6 @@ class LibraryActivity : AppCompatActivity() {
                 else -> "$legacyRootPath/${folder.name}"
             }
 
-            // Безопасное ограничение: coerceAtLeast/coerceAtMost не падают при size == 0
             val savedChap = prefs.getInt("chap_$uriKey", prefs.getInt("chap_$stateKey", 0))
                 .coerceAtLeast(0)
                 .coerceAtMost(audioFiles.size - 1)
@@ -259,12 +254,6 @@ class LibraryActivity : AppCompatActivity() {
             )
         }
         return result
-    }
-
-    /** Прерывает фоновое сканирование, если Activity уже уничтожена. */
-    private suspend fun ensureUiAlive() {
-        if (isFinishing || isDestroyed) throw kotlinx.coroutines.CancellationException("activity destroyed")
-        kotlinx.coroutines.yield()
     }
 
     private fun pathForTreeUri(treeUri: Uri): String? {
@@ -331,7 +320,6 @@ class LibraryActivity : AppCompatActivity() {
 
         override fun getItemCount(): Int = items.size
 
-        /** Декодирование обложки вне главного потока + защита от подмены позиции. */
         private fun loadCover(holder: BookViewHolder, coverUri: String?) {
             val tag = coverUri ?: ""
             holder.ivCover.tag = tag
@@ -356,7 +344,7 @@ class LibraryActivity : AppCompatActivity() {
                     }
                 }
                 if (bmp != null) coverCache.put(coverUri, bmp)
-                if (isActive && holder.ivCover.tag == tag && bmp != null) {
+                if (!isFinishing && !isDestroyed && holder.ivCover.tag == tag && bmp != null) {
                     holder.ivCover.setImageBitmap(bmp)
                 }
             }
