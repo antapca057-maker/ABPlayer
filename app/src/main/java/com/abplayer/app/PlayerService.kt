@@ -72,9 +72,6 @@ class PlayerService : Service() {
 
         val channel = NotificationChannel(CHANNEL_ID, "Воспроизведение", NotificationManager.IMPORTANCE_LOW)
         channel.setShowBadge(false)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            channel.setAudioAttributes(audioAttrs)
-        }
         notificationManager.createNotificationChannel(channel)
 
         mediaSession = MediaSessionCompat(this, "ABPlayerSession").apply {
