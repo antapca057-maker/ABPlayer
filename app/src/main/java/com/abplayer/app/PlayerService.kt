@@ -70,11 +70,10 @@ class PlayerService : Service() {
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .build()
 
-        val channel = NotificationChannel(CHANNEL_ID, "Воспроизведение", NotificationManager.IMPORTANCE_LOW).apply {
-            setShowBadge(false)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                setAudioAttributes(audioAttrs)
-            }
+        val channel = NotificationChannel(CHANNEL_ID, "Воспроизведение", NotificationManager.IMPORTANCE_LOW)
+        channel.setShowBadge(false)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            channel.setAudioAttributes(audioAttrs)
         }
         notificationManager.createNotificationChannel(channel)
 
