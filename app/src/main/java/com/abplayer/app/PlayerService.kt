@@ -1,9 +1,12 @@
 package com.abplayer.app
 
 import android.app.AlarmManager
+import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.BitmapFactory
 import android.media.AudioAttributes
 import android.media.audiofx.Equalizer
@@ -16,24 +19,21 @@ import android.os.SystemClock
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
+import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationCompat.MediaStyle
+import androidx.media.app.NotificationCompat.MediaStyle
 import com.google.android.exoplayer2.C
 import com.google.android.exoplayer2.ExoPlayer
 import com.google.android.exoplayer2.MediaItem
 import com.google.android.exoplayer2.PlaybackParameters
 import com.google.android.exoplayer2.Player
 import com.google.android.exoplayer2.audio.AudioAttributes as ExoAudioAttributes
-import android.view.KeyEvent
-
 
 class PlayerService : Service() {
-
 
     inner class LocalBinder : Binder() {
         fun getService(): PlayerService = this@PlayerService
     }
-
 
     private val binder = LocalBinder()
     var exoPlayer: ExoPlayer? = null
@@ -47,13 +47,11 @@ class PlayerService : Service() {
         getSystemService(NotificationManager::class.java)
     }
 
-
     var currentBookTitle: String = "ABPlayer"
     var currentChapterTitle: String = ""
     var currentCoverUri: Uri? = null
     var onChapterEndedCallback: (() -> Unit)? = null
     var onStateChangedCallback: (() -> Unit)? = null
-
 
     companion object {
         private const val CHANNEL_ID = "abplayer_channel"
@@ -64,18 +62,21 @@ class PlayerService : Service() {
         const val ACTION_STOP = "com.abplayer.ACTION_STOP"
     }
 
-
     override fun onCreate() {
         super.onCreate()
 
-        val audioAttributes = AudioAttributes.Builder()
+        val audioAttrs = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .build()
-        val channel = android.app.NotificationChannel(CHANNEL_ID, "Воспроизведение", NotificationManager.IMPORTANCE_LOW)
-            .apply { setShowBadge(false); setAudioAttributes(audioAttributes) }
-        notificationManager.createNotificationChannel(channel)
 
+        val channel = NotificationChannel(CHANNEL_ID, "Воспроизведение", NotificationManager.IMPORTANCE_LOW).apply {
+            setShowBadge(false)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                setAudioAttributes(audioAttrs)
+            }
+        }
+        notificationManager.createNotificationChannel(channel)
 
         mediaSession = MediaSessionCompat(this, "ABPlayerSession").apply {
             setCallback(object : MediaSessionCompat.Callback() {
@@ -116,6 +117,7 @@ class PlayerService : Service() {
                                 exoPlayer?.play()
                                 seekBy(-10000L)
                             }
+                            else -> {}
                         }
                         updateMediaSessionAndNotification()
                         return true
@@ -126,14 +128,13 @@ class PlayerService : Service() {
             isActive = true
         }
 
-
-        val exoAudioAttributes = ExoAudioAttributes.Builder()
+        val exoAudioAttrs = ExoAudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
             .build()
 
         exoPlayer = ExoPlayer.Builder(this)
-            .setAudioAttributes(exoAudioAttributes, true)
+            .setAudioAttributes(exoAudioAttrs, true)
             .setHandleAudioBecomingNoisy(true)
             .build().apply {
                 setWakeMode(C.WAKE_MODE_LOCAL)
@@ -154,7 +155,6 @@ class PlayerService : Service() {
             }
     }
 
-
     private fun seekBy(deltaMs: Long) {
         exoPlayer?.let {
             val dur = it.duration.coerceAtLeast(0L)
@@ -165,7 +165,6 @@ class PlayerService : Service() {
             }
         }
     }
-
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -184,9 +183,7 @@ class PlayerService : Service() {
         return START_STICKY
     }
 
-
     override fun onBind(intent: Intent?): IBinder = binder
-
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
@@ -212,7 +209,6 @@ class PlayerService : Service() {
             stopSelf()
         }
     }
-
 
     fun playFile(uri: Uri, bookTitle: String, chapterTitle: String, coverUri: Uri?, startPosMs: Long, speed: Float, autoPlay: Boolean) {
         currentBookTitle = bookTitle
@@ -244,6 +240,9 @@ class PlayerService : Service() {
         updateMediaSessionAndNotification()
     }
 
+    private fun serviceIntent(action: String): Intent {
+        return Intent(this, PlayerService::class.java).apply { this.action = action }
+    }
 
     fun updateMediaSessionAndNotification() {
         val player = exoPlayer
@@ -290,12 +289,12 @@ class PlayerService : Service() {
         val openIntent = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java), pendingFlags
         )
-        val rewIntent = PendingIntent.getService(this, 1, Intent(this, PlayerService::class.java).setAction(ACTION_REW), pendingFlags)
-        val playPauseIntent = PendingIntent.getService(this, 2, Intent(this, PlayerService::class.java).setAction(ACTION_PLAY_PAUSE), pendingFlags)
-        val fwdIntent = PendingIntent.getService(this, 3, Intent(this, PlayerService::class.java).setAction(ACTION_FWD), pendingFlags)
-        val stopIntent = PendingIntent.getService(this, 4, Intent(this, PlayerService::class.java).setAction(ACTION_STOP), pendingFlags)
+        val rewIntent = PendingIntent.getService(this, 1, serviceIntent(ACTION_REW), pendingFlags)
+        val playPauseIntent = PendingIntent.getService(this, 2, serviceIntent(ACTION_PLAY_PAUSE), pendingFlags)
+        val fwdIntent = PendingIntent.getService(this, 3, serviceIntent(ACTION_FWD), pendingFlags)
+        val stopIntent = PendingIntent.getService(this, 4, serviceIntent(ACTION_STOP), pendingFlags)
 
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+        val notifBuilder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(if (isPlaying) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause)
             .setContentTitle(currentBookTitle)
             .setContentText(currentChapterTitle)
@@ -316,17 +315,15 @@ class PlayerService : Service() {
             )
 
         if (coverBitmap != null) {
-            builder.setLargeIcon(coverBitmap)
+            notifBuilder.setLargeIcon(coverBitmap)
         }
 
         if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTIF_ID, builder.build(),
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+            startForeground(NOTIF_ID, notifBuilder.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
         } else {
-            startForeground(NOTIF_ID, builder.build())
+            startForeground(NOTIF_ID, notifBuilder.build())
         }
     }
-
 
     override fun onDestroy() {
         super.onDestroy()
