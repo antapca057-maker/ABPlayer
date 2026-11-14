@@ -70,9 +70,11 @@ class PlayerService : Service() {
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .build()
 
-        val channel = NotificationChannel(CHANNEL_ID, "Воспроизведение", NotificationManager.IMPORTANCE_LOW)
-        channel.setShowBadge(false)
-        notificationManager.createNotificationChannel(channel)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(CHANNEL_ID, "Воспроизведение", NotificationManager.IMPORTANCE_LOW)
+            channel.setShowBadge(false)
+            notificationManager.createNotificationChannel(channel)
+        }
 
         mediaSession = MediaSessionCompat(this, "ABPlayerSession").apply {
             setCallback(object : MediaSessionCompat.Callback() {
